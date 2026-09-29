@@ -1,5 +1,72 @@
 # NL-to-SQL Chat Assistant
 
+This repo is a completed implementation of the assignment described below. See
+**[PLAN.md](PLAN.md)** for the phased build plan and domain-rules summary,
+**[DESIGN.md](DESIGN.md)** for architecture/trade-offs, **[TESTS.md](TESTS.md)** for
+test results, and **[DEMO_SCRIPT.md](DEMO_SCRIPT.md)** for a guided walkthrough.
+
+## Setup — local (Docker)
+
+Prerequisites: Docker, Python 3 (for the data generator only), AWS credentials with
+Bedrock access (for the chat itself — the DB/UI/login work without it).
+
+```bash
+# 1. Generate the full dataset (2M sales rows, ~250MB — gitignored, not committed)
+python3 schema/generate_data.py
+
+# 2. Configure secrets
+cp .env.example .env
+# fill in POSTGRES_PASSWORD / APP_DB_PASSWORD / DEMO_USER_PASSWORD / SESSION_SECRET
+# (random values are fine — generate with: python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+# For Bedrock: either export AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
+# in your shell before `docker compose up`, or fill the AWS_* fields in .env directly.
+
+# 3. Start Postgres and load the full dataset
+docker compose up -d db
+docker compose --profile loader run --rm loader
+
+# 4. Start the app
+docker compose up -d backend
+# -> http://localhost:8000
+```
+
+Log in with any seeded user's email (see `db/load_data.py` for the full list — e.g.
+`sarah.chen@novapharma.com` for an Exec, `jennifer.walsh@novapharma.com` for a Director,
+`amy.nguyen@novapharma.com` for a RAM) and the password you set as `DEMO_USER_PASSWORD`.
+
+## Running tests
+
+```bash
+docker compose up -d db
+docker compose --profile loader run --rm loader   # if not already loaded
+docker compose --profile test run --rm tester
+```
+
+Writes/overwrites `TESTS.md` at the repo root every run. DB-security and SQL-validator
+tests run regardless of AWS credentials; NL-to-SQL accuracy and live security/edge-case
+tests require Bedrock access and are skipped (not failed) otherwise.
+
+## Deploying to AWS (Terraform)
+
+```bash
+cd infra
+terraform init
+terraform apply -var="repo_url=https://github.com/<you>/nl2sql-pharma-assistant.git"
+# takes a few minutes: VPC/RDS/EC2 provisioning, then EC2's user-data script installs
+# Docker, regenerates the dataset, loads RDS, and starts the app
+
+terraform output app_url               # public URL
+terraform output -raw demo_user_password  # shared login password for all seeded users
+```
+
+Requires: AWS credentials with permission to create VPC/RDS/EC2/IAM/Budgets resources,
+and Bedrock model access (the Anthropic Claude model you configure via
+`var.bedrock_model_id`) enabled in the target region's Bedrock console — this is a
+one-time manual opt-in per AWS account/region that Terraform cannot do for you.
+
+To tear down: `terraform destroy` (not run as part of this build — see the project's
+`.claude/settings.json` guardrails, which block it from being run automatically).
+
 ## Overview
 
 Build and deploy an end-to-end conversational AI assistant that translates natural language questions into SQL queries against a pharmaceutical sales database. The assistant must understand domain-specific business knowledge (provided in the `docs/` folder) to generate correct queries.

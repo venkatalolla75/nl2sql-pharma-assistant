@@ -19,12 +19,20 @@
 --      has BYPASSRLS and sees everything.
 --
 -- org_scope (org_id -> territory_name/region_name, see 01_schema.sql) backs the RLS
--- check. It is deliberately NOT granted to app_director/app_ram directly — that would
--- let a RAM run `SELECT DISTINCT territory_name FROM org_scope` and enumerate every
--- territory/org in the company, which is itself a scope leak. Instead the policies call
--- a SECURITY DEFINER function that checks org_scope with the function owner's privileges,
--- so app_director/app_ram can ask "is org X in my scope?" without being able to read the
--- table's rows directly.
+-- check via a direct EXISTS subquery against a table app_director/app_ram are granted
+-- SELECT on. An earlier version routed this through a SECURITY DEFINER function instead,
+-- specifically to stop a RAM from running `SELECT DISTINCT territory_name FROM org_scope`
+-- and enumerating every territory/org in the company. That held up under targeted
+-- role-switch tests but fell over at 2M-row scale: Postgres cannot inline a
+-- SECURITY DEFINER function into the query plan, so `org_in_scope(sales.org_id)`
+-- evaluated once per row instead of as a set-based semi-join — a plain scoped
+-- `SELECT count(*) FROM sales` timed out past 8s. Reverted to the direct-subquery form,
+-- which the planner turns into an indexed semi-join and executes in milliseconds.
+-- Trade-off accepted: org_scope contains only org_id/territory_name/region_name (no
+-- sales figures, no WAC, no addresses) — a RAM can see the full territory/region list
+-- and how orgs map to them, but not any organization's identity/address details (those
+-- stay row-scoped via the `orgs_scope` policy on `organizations` itself) or any sales
+-- data outside their own scope.
 
 -- ---------------------------------------------------------------------------
 -- Roles
@@ -62,8 +70,9 @@ GRANT SELECT ON products, zip_territory TO app_exec, app_director, app_ram;
 -- organizations: all columns, row-scoped by RLS below (no sensitive columns here)
 GRANT SELECT ON organizations TO app_exec, app_director, app_ram;
 
--- org_scope: intentionally NOT granted here — see design note above. Accessed only
--- through the SECURITY DEFINER function org_in_scope() below.
+-- org_scope: needed directly by the RLS policies' EXISTS subqueries — see design note
+-- above for why this is a plain GRANT rather than a SECURITY DEFINER function.
+GRANT SELECT ON org_scope TO app_exec, app_director, app_ram;
 
 -- sales: app_exec gets every column including wac.
 GRANT SELECT ON sales TO app_exec;
@@ -81,33 +90,8 @@ GRANT SELECT (
 -- are never granted access, so a prompt-injected "SELECT * FROM users" fails at the DB.
 GRANT SELECT ON users TO app_login;
 
--- ---------------------------------------------------------------------------
--- Scope-check function (SECURITY DEFINER — owned by the bootstrapping role, typically
--- the default `postgres` superuser or whichever role ran this script)
--- ---------------------------------------------------------------------------
-
-CREATE OR REPLACE FUNCTION org_in_scope(p_org_id TEXT)
-RETURNS BOOLEAN
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-    SELECT EXISTS (
-        SELECT 1 FROM org_scope s
-        WHERE s.org_id = p_org_id
-          AND (
-              (current_setting('app.current_role', true) = 'director'
-                  AND s.region_name = current_setting('app.current_region', true))
-              OR
-              (current_setting('app.current_role', true) = 'ram'
-                  AND s.territory_name = current_setting('app.current_territory', true))
-          )
-    );
-$$;
-
-REVOKE ALL ON FUNCTION org_in_scope(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION org_in_scope(TEXT) TO app_director, app_ram;
+-- Cleanup from an earlier revision of this file (see design note above).
+DROP FUNCTION IF EXISTS org_in_scope(TEXT);
 
 -- ---------------------------------------------------------------------------
 -- Row-level security
@@ -120,11 +104,35 @@ ALTER TABLE organizations FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS sales_scope ON sales;
 CREATE POLICY sales_scope ON sales
-    USING ( org_in_scope(sales.org_id) );
+    USING (
+        EXISTS (
+            SELECT 1 FROM org_scope s
+            WHERE s.org_id = sales.org_id
+              AND (
+                  (current_setting('app.current_role', true) = 'director'
+                      AND s.region_name = current_setting('app.current_region', true))
+                  OR
+                  (current_setting('app.current_role', true) = 'ram'
+                      AND s.territory_name = current_setting('app.current_territory', true))
+              )
+        )
+    );
 
 DROP POLICY IF EXISTS orgs_scope ON organizations;
 CREATE POLICY orgs_scope ON organizations
-    USING ( org_in_scope(organizations.org_id) );
+    USING (
+        EXISTS (
+            SELECT 1 FROM org_scope s
+            WHERE s.org_id = organizations.org_id
+              AND (
+                  (current_setting('app.current_role', true) = 'director'
+                      AND s.region_name = current_setting('app.current_region', true))
+                  OR
+                  (current_setting('app.current_role', true) = 'ram'
+                      AND s.territory_name = current_setting('app.current_territory', true))
+              )
+        )
+    );
 
 -- app_exec bypasses both policies via BYPASSRLS (granted above), so it needs no policy
 -- clause of its own and always sees every row.

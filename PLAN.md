@@ -165,8 +165,17 @@ specialty (Oncology | Urology) → market_category (therapeutic area) → market
 
 | # | Phase | Blocker | Status |
 |---|---|---|---|
-| 1 | 0 | `gh` CLI not authenticated — repo creation/push needs `gh auth login` (interactive OAuth) | Open — needs user |
-| 2 | 4 | No AWS credentials present (`~/.aws` absent, no env vars) — Terraform/AWS CLI need `aws configure` or env vars | Open — needs user |
+| 1 | 0 | `gh` CLI not authenticated — repo creation/push needs `gh auth login` (interactive OAuth) | Open — needs user. gh/terraform/aws CLIs installed via winget and confirmed working; only auth is missing. |
+| 2 | 2/4 | No AWS credentials present (`~/.aws` absent, no env vars) — confirmed via a live `/chat` call against the running local stack: fails cleanly with "Unable to locate credentials" (friendly error path verified working). Blocks testing NL-to-SQL correctness (Phase 3) and all of Phase 4. | Open — needs user |
 | 3 | 4 | Bedrock model access (Anthropic Claude) must be enabled for the target AWS account/region in the Bedrock console before `InvokeModel` calls succeed | To verify once credentials are available |
+
+**Verified working despite blockers**: full local stack builds and runs (Postgres 16 in
+Docker, full 2M-row dataset loaded via COPY, FastAPI backend, login/session flow).
+Database-level security independently verified with raw psql role-switch tests:
+RAM sees 2,648/40,000 orgs and 136,921/2,000,000 sales rows (New York Metro only, WAC
+column access denied by Postgres itself); Director sees 5,211 orgs/268,912 sales
+(Northeast region); Exec sees all 40,000/2,000,000 rows plus full WAC — and even
+app_exec is denied access to the `users` table, so LLM-generated SQL can never read
+credentials regardless of role.
 
 (Entries updated live as work proceeds; see final summary for resolution status.)

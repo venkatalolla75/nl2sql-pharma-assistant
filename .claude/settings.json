@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(terraform destroy*)",
+      "PowerShell(terraform destroy*)",
+
+      "Bash(rm -rf*)",
+      "Bash(rm -fr*)",
+      "Bash(sudo rm -rf*)",
+      "Bash(sudo rm -fr*)",
+      "PowerShell(Remove-Item -Recurse -Force*)",
+      "PowerShell(ri -Recurse -Force*)",
+      "PowerShell(rm -Recurse -Force*)",
+      "PowerShell(rd /s /q*)",
+      "PowerShell(Remove-Item*-Force*-Recurse*)",
+
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Edit(~/.ssh/**)",
+      "Edit(~/.aws/**)",
+      "Bash(cat ~/.ssh/*)",
+      "Bash(cat ~/.aws/*)",
+      "Bash(cp ~/.ssh/*)",
+      "Bash(cp ~/.aws/*)",
+      "Bash(less ~/.ssh/*)",
+      "Bash(less ~/.aws/*)",
+      "PowerShell(Get-Content*.ssh*)",
+      "PowerShell(Get-Content*.aws*)",
+      "PowerShell(Copy-Item*.ssh*)",
+      "PowerShell(Copy-Item*.aws*)",
+
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "PowerShell(git push --force*)",
+      "PowerShell(git push -f*)"
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+# Production compose file used on the EC2 instance. Unlike the root docker-compose.yml
+# (local dev, runs its own Postgres container), this targets RDS — no local db service.
+# Run with: docker compose --project-directory /opt/app -f infra/docker-compose.aws.yml
+#           --env-file .env <command>
+# (--project-directory keeps ./backend build-context paths resolved from the repo root
+# rather than from this file's own infra/ directory.)
+
+services:
+  loader:
+    build: ./backend
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-pharma}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD}
+    volumes:
+      - ./db:/app/db
+      - ./schema:/app/schema
+    working_dir: /app
+    entrypoint: ["python3", "db/load_data.py"]
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-pharma}
+      APP_DB_USER: app_login
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-anthropic.claude-3-5-sonnet-20241022-v2:0}
+      STATEMENT_TIMEOUT_MS: ${STATEMENT_TIMEOUT_MS:-8000}
+    ports:
+      - "80:8000"

@@ -159,19 +159,22 @@ Q: What is our market share for Zenovax in the Docetaxel market?
 SQL: SELECT (SELECT SUM(s.pack_units * p.unit_conversion_factor) FROM sales s JOIN products p ON s.ndc = p.ndc WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND p.market_subcategory = 'Docetaxel') / NULLIF((SELECT SUM(s.pack_units * p.unit_conversion_factor) FROM sales s JOIN products p ON s.ndc = p.ndc WHERE s.data_source = 'market_data' AND p.market_subcategory = 'Docetaxel'), 0) AS market_share
 
 Q: What's our market share by drug class?
-SQL: SELECT p.market_subcategory, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF(SUM(CASE WHEN s.data_source = 'market_data' THEN s.pack_units * p.unit_conversion_factor END), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc GROUP BY p.market_subcategory
+SQL: SELECT p.market_subcategory, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF(SUM(CASE WHEN s.data_source = 'market_data' THEN s.pack_units * p.unit_conversion_factor END), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc WHERE s.mo_offset IN (0,1,2) GROUP BY p.market_subcategory
 -- NOTE: broken down by a dimension -> single-pass conditional aggregation (rule 10),
 -- not a correlated subquery per group. The same technique works for any other
 -- breakdown dimension EXCEPT our own individual products (region, territory, account,
 -- period, ...) - just change what you GROUP BY and join in whatever table gets you
--- there (e.g. join organizations + zip_territory for region/territory). For "by
--- product"/"by drug"/"for each of our products" specifically, see rule 11 and the next
--- example instead - GROUP BY p.drug_name needs the different denominator-matching
--- rule 11 describes, not this one.
+-- there (e.g. join organizations + zip_territory for region/territory). No period was
+-- named here either, so mo_offset IN (0,1,2) applies (rule 8) even though this is a
+-- ratio, not a plain SUM - breaking a metric down by a dimension usually adds joins
+-- (to organizations/zip_territory for region or territory), and without a period filter
+-- that join runs against the full 3-year table, not just a recent slice.
 
 Q: What's our market share for each of our own products?
-SQL: WITH denom AS (SELECT p2.market_subcategory, SUM(s2.pack_units * p2.unit_conversion_factor) AS mkt_total FROM sales s2 JOIN products p2 ON s2.ndc = p2.ndc WHERE s2.data_source = 'market_data' GROUP BY p2.market_subcategory) SELECT p.drug_name, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF(MAX(denom.mkt_total), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc JOIN denom ON denom.market_subcategory = p.market_subcategory WHERE s.data_source = 'distributor' AND s.brand_flag = 1 GROUP BY p.drug_name
--- NOTE: rule 11. Whenever the breakdown dimension is our own individual products
+SQL: WITH denom AS (SELECT p2.market_subcategory, SUM(s2.pack_units * p2.unit_conversion_factor) AS mkt_total FROM sales s2 JOIN products p2 ON s2.ndc = p2.ndc WHERE s2.data_source = 'market_data' AND s2.mo_offset IN (0,1,2) GROUP BY p2.market_subcategory) SELECT p.drug_name, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF(MAX(denom.mkt_total), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc JOIN denom ON denom.market_subcategory = p.market_subcategory WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.mo_offset IN (0,1,2) GROUP BY p.drug_name
+-- NOTE: rule 11, plus the same no-period-named -> R3M default as the previous example
+-- (rule 8), applied symmetrically to both sides of the ratio (rule 12). Whenever the
+-- breakdown dimension is our own individual products
 -- (GROUP BY drug_name, ndc, or similar) rather than region/territory/period/account,
 -- use THIS shape, not the previous example's - market_data never carries rows under a
 -- NovaPharma product's own ndc, so matching the denominator by ndc/drug_name like the

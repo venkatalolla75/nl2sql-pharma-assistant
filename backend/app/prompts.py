@@ -80,6 +80,18 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
 
 7. Only use SELECT statements. Never reference the `users` table. Return one query, no
    markdown fences, no trailing semicolon required.
+
+8. DEFAULT TIME PERIOD: if the question does not specify a time period (no "this month",
+   "this quarter", "last 6 months", "all time", etc.), default to the last 3 months
+   (R3M): mo_offset IN (0,1,2). Do not scan the entire history unless the user explicitly
+   asks for it (e.g. "all time", "since launch", "historical"). This matters for both
+   correctness (an unscoped "top product" is a different answer than "top product this
+   quarter") and performance (sales has millions of rows spanning 3 years).
+
+9. For a "top N by <aggregate>" question, compute the identity and the aggregate value in
+   ONE pass — GROUP BY, ORDER BY the aggregate, LIMIT N — never a CTE that finds the top
+   ID first and then re-queries sales a second time for that ID's value; that scans the
+   table twice for no benefit. See the example below.
 """
 
 FEWSHOT_EXEC = """
@@ -90,6 +102,12 @@ SQL: SELECT SUM(wac) AS revenue FROM sales WHERE data_source = 'distributor' AND
 
 Q: Top 10 accounts by revenue this quarter
 SQL: SELECT COALESCE(o.grandparent_org_name, o.org_name) AS account_name, SUM(s.wac) AS revenue FROM sales s JOIN organizations o ON s.org_id = o.org_id WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.period_qtr = (SELECT period_qtr FROM sales WHERE mo_offset = 0 LIMIT 1) GROUP BY account_name ORDER BY revenue DESC LIMIT 10
+
+Q: What's the WAC revenue for our top product?
+SQL: SELECT drug_name, SUM(wac) AS wac_revenue FROM sales WHERE data_source = 'distributor' AND brand_flag = 1 AND mo_offset IN (0,1,2) GROUP BY drug_name ORDER BY wac_revenue DESC LIMIT 1
+-- NOTE: no period was named, so this defaults to R3M (rule 8) — and it's one pass
+-- (GROUP BY + ORDER BY + LIMIT), not a CTE that finds the top drug then re-queries for
+-- its total (rule 9).
 """
 
 FEWSHOT_COMMON = """
@@ -188,8 +206,16 @@ completely). Write a concise, friendly, business-appropriate natural-language an
 - Use plain business language (dollars/units), not column names, unless useful for clarity.
 - If the row count is 0, say so plainly and suggest a reason (e.g. no data for that
   filter) rather than inventing an answer.
-- If a note about access restrictions (WAC hidden, territory-scoped results) is passed in,
-  weave it in naturally — briefly, once, not repeated every turn.
+- If a note below mentions the time period the results cover, state it explicitly and
+  plainly (e.g. "for the last 3 months, Jul 1 - Sep 30, 2026") — use the exact period
+  given in the note, never guess or invent your own date range.
+- If a note below mentions an access restriction (WAC hidden, territory/region-scoped
+  results), weave it in naturally — briefly, once, not repeated every turn. If NO such
+  note is given, do not mention or imply any scope/access restriction yourself — in
+  particular, an Exec sees company-wide data across every territory and region, so never
+  say results are "limited to your territory" or similar for an Exec; only say that when
+  a note explicitly tells you to, using the note's own wording (region for a Director,
+  territory for a RAM).
 - Never mention SQL, table names, or column names unless the user asked to see the query.
 - Keep it under ~120 words unless the question needs a longer breakdown (e.g. a trend
   over many periods).

@@ -2,6 +2,7 @@ import os
 import re
 import secrets
 
+import psycopg
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app import bedrock
 from app.auth import authenticate, get_user_by_id
 from app.db import scoped_cursor
+from app.periods import period_note as _period_note
 from app.sql_guard import SqlValidationError, validate_and_finalize
 
 app = FastAPI(title="NovaPharma NL-to-SQL Assistant")
@@ -138,12 +140,19 @@ def chat(body: ChatRequest, request: Request):
             status_code=502,
         )
 
+    # In every branch below, the assistant's history entry is always the raw/validated
+    # SQL text the model produced for this turn — never a human-facing message. History
+    # is replayed straight into the next generate_sql() call, and storing anything other
+    # than SQL there caused weaker-instruction-following models to pattern-match and echo
+    # that non-SQL shape back on the next turn (see commit history for the two bugs this
+    # already caused: a mixed "[SQL: ...]\n{answer}" format, and a plain-English error
+    # message), breaking follow-ups both times.
     if raw_sql.upper().startswith("NO_QUERY"):
         reason = raw_sql.split(":", 1)[1].strip() if ":" in raw_sql else \
             "I don't have the data to answer that."
         answer = f"I'm not able to answer that from the data available to me — {reason}"
         history.append({"role": "user", "content": question})
-        history.append({"role": "assistant", "content": answer})
+        history.append({"role": "assistant", "content": raw_sql})
         del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
         return {"answer": answer, "sql": None, "columns": [], "rows": [], "row_count": 0}
 
@@ -151,7 +160,7 @@ def chat(body: ChatRequest, request: Request):
         final_sql = validate_and_finalize(raw_sql, user["role"])
     except SqlValidationError as exc:
         history.append({"role": "user", "content": question})
-        history.append({"role": "assistant", "content": exc.user_message})
+        history.append({"role": "assistant", "content": raw_sql})
         del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
         return {
             "answer": exc.user_message, "sql": raw_sql if body.show_sql else None,
@@ -165,14 +174,31 @@ def chat(body: ChatRequest, request: Request):
             cur.execute(final_sql)
             columns = [d.name for d in cur.description] if cur.description else []
             rows = cur.fetchall() if cur.description else []
-    except Exception as exc:
+    except psycopg.errors.InsufficientPrivilege as exc:
+        # The ONLY case where "outside your access level" is actually true: the DB
+        # itself (column grants / RLS) denied this query. Every other DB failure below
+        # gets a generic message instead — a prior bug always blamed "access level"
+        # regardless of cause, which was flatly wrong for e.g. a statement timeout.
         friendly = (
-            "I wasn't able to run that query — it may have asked for data outside "
-            "your access level. Try rephrasing, or ask for a volume-based figure "
-            "instead of dollars."
+            "I wasn't able to run that query — it asked for data outside your access "
+            "level. Try rephrasing, or ask for a volume-based figure instead of dollars."
         )
         history.append({"role": "user", "content": question})
-        history.append({"role": "assistant", "content": friendly})
+        history.append({"role": "assistant", "content": final_sql})
+        del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
+        return JSONResponse(
+            {"answer": friendly, "sql": final_sql if body.show_sql else None,
+             "columns": [], "rows": [], "row_count": 0, "error": str(exc)},
+            status_code=200,
+        )
+    except Exception as exc:
+        friendly = (
+            "I wasn't able to run that query — it may have been too complex or slow "
+            "for the current data volume. Try narrowing the time period or rephrasing "
+            "your question."
+        )
+        history.append({"role": "user", "content": question})
+        history.append({"role": "assistant", "content": final_sql})
         del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
         return JSONResponse(
             {"answer": friendly, "sql": final_sql if body.show_sql else None,
@@ -181,16 +207,17 @@ def chat(body: ChatRequest, request: Request):
         )
 
     row_count = len(rows)
-    access_note = _access_note(user["role"], question)
+    notes = [n for n in (_access_note(user["role"], question), _period_note(final_sql)) if n]
+    combined_note = "; ".join(notes) if notes else None
 
     try:
         answer = bedrock.generate_answer(
-            question, final_sql, columns, [list(r) for r in rows], access_note, row_count
+            question, final_sql, columns, [list(r) for r in rows], combined_note, row_count
         )
     except Exception:
         answer = (
             f"Query returned {row_count} row(s)."
-            + (f" Note: {access_note}." if access_note else "")
+            + (f" Note: {combined_note}." if combined_note else "")
         )
 
     history.append({"role": "user", "content": question})

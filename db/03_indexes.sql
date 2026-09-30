@@ -9,6 +9,7 @@ CREATE INDEX IF NOT EXISTS idx_sales_wk_offset      ON sales (wk_offset);
 CREATE INDEX IF NOT EXISTS idx_sales_period_mo      ON sales (period_mo);
 CREATE INDEX IF NOT EXISTS idx_sales_period_qtr     ON sales (period_qtr);
 CREATE INDEX IF NOT EXISTS idx_sales_source_brand   ON sales (data_source, brand_flag);
+CREATE INDEX IF NOT EXISTS idx_sales_source_brand_mo ON sales (data_source, brand_flag, mo_offset);
 CREATE INDEX IF NOT EXISTS idx_sales_transaction_dt ON sales (transaction_date);
 
 -- organizations: hierarchy rollups and zip -> territory join

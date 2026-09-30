@@ -70,8 +70,14 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
 
 5. TIME: prefer wk_offset/mo_offset over date arithmetic. 0 = current period.
    R3M (last 3 months) = mo_offset IN (0,1,2). R6M/prior-3-months = mo_offset IN (3,4,5).
-   Last quarter = mo_offset IN (1,2,3). Use period_wk/period_mo/period_qtr for GROUP BY
-   trend labels, not raw dates.
+   Last quarter = mo_offset IN (1,2,3). "This year"/"year to date"/"so far this year" =
+   mo_offset BETWEEN 0 AND 11 (trailing 12 months — there's no calendar-year column).
+   "Last year" = mo_offset BETWEEN 12 AND 23. Use period_wk/period_mo/period_qtr for
+   GROUP BY trend labels, not raw dates. Always filter by comparing wk_offset/mo_offset
+   directly (=, IN, BETWEEN) — never derive a period filter indirectly through a subquery
+   on the period label columns (e.g. `period_qtr IN (SELECT DISTINCT period_qtr FROM
+   sales WHERE mo_offset ...)`); that's both an unnecessary extra step and far slower on
+   a table this size than filtering the offset column itself.
 
 6. PRODUCTS: brand_flag=1 on products/sales = one of NovaPharma's 7 branded products
    (Zenovax, Carbotrel, Gemtara, Paxelium, Oncosetron, Cyclonova, Luprex Depot).
@@ -92,6 +98,17 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
    ONE pass — GROUP BY, ORDER BY the aggregate, LIMIT N — never a CTE that finds the top
    ID first and then re-queries sales a second time for that ID's value; that scans the
    table twice for no benefit. See the example below.
+
+10. When a ratio/multi-filter metric (market share, or any "X / Y where X and Y use
+    different WHERE filters" calculation) needs to be broken down BY a dimension
+    (region, territory, product, period, account, ...), compute every branch in ONE pass
+    with conditional aggregation — SUM(CASE WHEN <filter A> THEN <expr> END) / NULLIF(
+    SUM(CASE WHEN <filter B> THEN <expr> END), 0) — GROUP BY that dimension. Never use a
+    correlated subquery per group (a subquery inside the SELECT list referencing an outer
+    GROUP BY column): it's fragile — easy to reference a column the subquery's own FROM
+    clause doesn't have, or a column PostgreSQL rejects as "ungrouped" — and even when it
+    is valid SQL, it re-executes once per group instead of once total. See the example
+    below; the same technique applies regardless of which dimension you're grouping by.
 """
 
 FEWSHOT_EXEC = """
@@ -122,6 +139,25 @@ SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 
 Q: What is our market share for Zenovax in the Docetaxel market?
 SQL: SELECT (SELECT SUM(s.pack_units * p.unit_conversion_factor) FROM sales s JOIN products p ON s.ndc = p.ndc WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND p.market_subcategory = 'Docetaxel') / NULLIF((SELECT SUM(s.pack_units * p.unit_conversion_factor) FROM sales s JOIN products p ON s.ndc = p.ndc WHERE s.data_source = 'market_data' AND p.market_subcategory = 'Docetaxel'), 0) AS market_share
 
+Q: What's our market share by drug class?
+SQL: SELECT p.market_subcategory, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF(SUM(CASE WHEN s.data_source = 'market_data' THEN s.pack_units * p.unit_conversion_factor END), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc GROUP BY p.market_subcategory
+-- NOTE: broken down by a dimension -> single-pass conditional aggregation (rule 10),
+-- not a correlated subquery per group. The same technique works for any other
+-- breakdown dimension (region, territory, account, period, ...) - just change what
+-- you GROUP BY and join in whatever table gets you there (e.g. join organizations +
+-- zip_territory to break down by region/territory instead of by product).
+
+Q: What's our market share for each of our own products?
+SQL: SELECT p.drug_name, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF((SELECT SUM(s2.pack_units * p2.unit_conversion_factor) FROM sales s2 JOIN products p2 ON s2.ndc = p2.ndc WHERE s2.data_source = 'market_data' AND p2.market_subcategory = p.market_subcategory), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc WHERE p.brand_flag = 1 GROUP BY p.drug_name, p.market_subcategory
+-- NOTE: breaking market share down BY OUR OWN PRODUCT is different from rule 10's usual
+-- case - market_data never carries rows under a NovaPharma product's own ndc (it's
+-- competitor/market volume, not a per-NovaPharma-product estimate), so matching the
+-- denominator by ndc/drug_name like the numerator would wrongly return NULL/0 for every
+-- product. The denominator has to match by market_subcategory instead (the correct
+-- market-share definition, rule 2) - a small, cheap correlated subquery here is fine
+-- since it's correlating on market_subcategory (few distinct values), not one subquery
+-- execution per raw row.
+
 Q: Show me the monthly volume trend for my largest account over the last 6 months
 SQL: SELECT s.period_mo, SUM(s.pack_units) AS total_units FROM sales s JOIN organizations o ON s.org_id = o.org_id WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.mo_offset BETWEEN 0 AND 5 AND COALESCE(o.grandparent_org_name, o.org_name) = (SELECT COALESCE(o2.grandparent_org_name, o2.org_name) FROM sales s2 JOIN organizations o2 ON s2.org_id = o2.org_id WHERE s2.data_source = 'distributor' AND s2.brand_flag = 1 GROUP BY COALESCE(o2.grandparent_org_name, o2.org_name) ORDER BY SUM(s2.pack_units) DESC LIMIT 1) GROUP BY s.period_mo ORDER BY s.period_mo
 
@@ -141,7 +177,8 @@ For revenue-style questions, answer with volume metrics — pack_units or equiva
 instead):
 
 Q: What are our total sales?
-SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1
+SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.mo_offset IN (0,1,2)
+-- NOTE: no period was named, so this defaults to R3M (rule 8) same as for an Exec.
 
 Q: What's our revenue this month?
 SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.mo_offset = 0
@@ -149,7 +186,7 @@ SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 
 -- pricing isn't available at their level and this is a units-based figure instead.
 
 Q: Compare all territories
-SQL: SELECT COALESCE(o.grandparent_org_name, o.org_name) AS account_name, SUM(s.pack_units) AS total_units FROM sales s JOIN organizations o ON s.org_id = o.org_id WHERE s.data_source = 'distributor' AND s.brand_flag = 1 GROUP BY account_name ORDER BY total_units DESC
+SQL: SELECT COALESCE(o.grandparent_org_name, o.org_name) AS account_name, SUM(s.pack_units) AS total_units FROM sales s JOIN organizations o ON s.org_id = o.org_id WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.mo_offset IN (0,1,2) GROUP BY account_name ORDER BY total_units DESC
 -- NOTE: the database's row-level security silently restricts this to the caller's own
 -- territory/region — do not try to add territory/region filters yourself, and the answer
 -- step should mention the results are limited to the user's own scope.

@@ -18,7 +18,7 @@ from contextlib import contextmanager
 
 import psycopg
 
-STATEMENT_TIMEOUT_MS = int(os.environ.get("STATEMENT_TIMEOUT_MS", "8000"))
+STATEMENT_TIMEOUT_MS = int(os.environ.get("STATEMENT_TIMEOUT_MS", "20000"))
 
 
 def _conninfo() -> str:

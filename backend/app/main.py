@@ -1,6 +1,8 @@
 import os
 import re
 import secrets
+import time
+from collections import deque
 
 import psycopg
 from fastapi import FastAPI, Request, HTTPException
@@ -27,6 +29,24 @@ MAX_HISTORY_TURNS = 6  # user+assistant pairs kept per conversation
 # In-memory only — acceptable for a take-home demo; a production build would move this
 # to Redis/DB-backed session storage so it survives restarts and multiple app instances.
 _conversations: dict[str, list[dict]] = {}
+
+RATE_LIMIT_PER_HOUR = 60
+RATE_LIMIT_WINDOW_SECONDS = 3600
+# Per-user sliding window of request timestamps. In-memory, same caveat as
+# _conversations above — caps both brute-force abuse of the shared demo login and
+# per-user Bedrock spend. Keyed by user_id (not session), so it survives logout/login.
+_chat_request_times: dict[str, deque] = {}
+
+
+def _rate_limit_ok(user_id: str) -> bool:
+    now = time.monotonic()
+    window = _chat_request_times.setdefault(user_id, deque())
+    while window and now - window[0] > RATE_LIMIT_WINDOW_SECONDS:
+        window.popleft()
+    if len(window) >= RATE_LIMIT_PER_HOUR:
+        return False
+    window.append(now)
+    return True
 
 _REVENUE_WORDS = re.compile(
     r"\b(revenue|dollars?|\$|price|pricing|wac|cost|profit)\b", re.IGNORECASE
@@ -118,6 +138,15 @@ def _access_note(role: str, question: str) -> str | None:
 @app.post("/chat")
 def chat(body: ChatRequest, request: Request):
     user = _require_user(request)
+
+    if not _rate_limit_ok(user["user_id"]):
+        return JSONResponse(
+            {"answer": f"You've reached the limit of {RATE_LIMIT_PER_HOUR} questions "
+                       "per hour. Please try again a bit later.",
+             "sql": None, "columns": [], "rows": [], "row_count": 0},
+            status_code=429,
+        )
+
     question = body.message.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Empty message")

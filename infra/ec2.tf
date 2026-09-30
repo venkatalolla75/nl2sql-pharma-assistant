@@ -46,3 +46,14 @@ resource "aws_instance" "app" {
 
   depends_on = [aws_db_instance.main]
 }
+
+# Stable public URL across EC2 replacements (e.g. a user-data change forces a new
+# instance) — without this, app_url changes every time the instance is replaced, which
+# happened repeatedly during this build. terraform destroy releases it; an EIP attached
+# to a running instance is free, only an unattached one costs anything.
+resource "aws_eip" "app" {
+  domain   = "vpc"
+  instance = aws_instance.app.id
+
+  tags = { Name = "${var.project_name}-app-eip" }
+}

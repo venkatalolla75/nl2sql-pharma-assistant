@@ -1,10 +1,10 @@
 output "app_url" {
-  description = "Public URL of the deployed chat app."
-  value       = "http://${aws_instance.app.public_ip}"
+  description = "Public URL of the deployed chat app. Stable across EC2 replacements (Elastic IP)."
+  value       = "http://${aws_eip.app.public_ip}"
 }
 
 output "ec2_public_ip" {
-  value = aws_instance.app.public_ip
+  value = aws_eip.app.public_ip
 }
 
 output "rds_endpoint" {

@@ -52,13 +52,11 @@ done
 
 COMPOSE="docker compose --project-directory /opt/app -f /opt/app/infra/docker-compose.aws.yml --env-file /opt/app/.env"
 
-# --- Load the full dataset into RDS (idempotent-ish: ON CONFLICT DO NOTHING for users;
-#     tables are created IF NOT EXISTS, but re-running COPY would duplicate sales rows,
-#     so this only runs once per instance via the marker file below) ---
-if [ ! -f /opt/app/.data-loaded ]; then
-  $COMPOSE run --rm loader
-  touch /opt/app/.data-loaded
-fi
+# --- Load the full dataset into RDS. load_data.py TRUNCATEs first, so this is safe to
+#     run unconditionally — including when Terraform replaces this EC2 instance (e.g. a
+#     user-data change) against the SAME already-loaded RDS instance, which a local
+#     marker file here can't know about since it doesn't survive instance replacement. ---
+$COMPOSE run --rm loader
 
 # --- Start the app ---
 $COMPOSE up -d backend

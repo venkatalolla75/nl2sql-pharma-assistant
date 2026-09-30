@@ -119,6 +119,13 @@ def main():
                 )
             )
 
+            print("=== Clearing existing data (safe to re-run against an already-loaded "
+                  "DB, e.g. redeploying EC2 against the same RDS instance) ===")
+            cur.execute(
+                "TRUNCATE TABLE sales, org_scope, organizations, products, zip_territory "
+                "RESTART IDENTITY CASCADE"
+            )
+
             print("=== Loading reference + organization data ===")
             copy_csv(
                 cur, "organizations",

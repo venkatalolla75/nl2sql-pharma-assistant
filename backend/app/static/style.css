@@ -45,6 +45,12 @@ body {
 
 .screen { height: 100vh; }
 
+/* #login-screen/#chat-screen below set display:flex, which (same specificity, later in
+   the cascade) overrides the [hidden] attribute the JS toggles on logout/login - without
+   !important, a "hidden" screen still renders as flex and stays visible until a page
+   refresh. */
+[hidden] { display: none !important; }
+
 /* ---------- Login ---------- */
 
 #login-screen {

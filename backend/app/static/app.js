@@ -134,6 +134,8 @@ logoutBtn.addEventListener("click", async () => {
   chatScreen.hidden = true;
   document.getElementById("email").value = "";
   document.getElementById("password").value = "";
+  messagesEl.innerHTML = "";
+  chatInput.value = "";
 });
 
 chatForm.addEventListener("submit", async (e) => {

@@ -194,7 +194,12 @@ def chat(body: ChatRequest, request: Request):
         )
 
     history.append({"role": "user", "content": question})
-    history.append({"role": "assistant", "content": f"[SQL: {final_sql}]\n{answer}"})
+    # Store only the raw SQL here (not "[SQL: ...]\n{answer}") — this list is replayed
+    # straight into the next generate_sql() call, and weaker-instruction-following models
+    # (e.g. Nova) were found to pattern-match a mixed SQL+prose format from history and
+    # echo that same hybrid shape back instead of raw SQL, tripping sql_guard's
+    # SELECT-only check on the very next turn.
+    history.append({"role": "assistant", "content": final_sql})
     del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
 
     return {

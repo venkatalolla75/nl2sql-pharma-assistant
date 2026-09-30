@@ -15,13 +15,18 @@ resource "aws_iam_role" "ec2" {
 
 data "aws_iam_policy_document" "bedrock_invoke" {
   statement {
-    sid = "InvokeClaudeModels"
+    # Scoped to Anthropic + Amazon Nova so BEDROCK_MODEL_ID can point at either
+    # family without an IAM change. Anthropic models on this account currently fail
+    # with an AWS Marketplace subscription error unrelated to IAM (see DESIGN.md) -
+    # Nova is the default for that reason, but both stay authorized here.
+    sid = "InvokeBedrockModels"
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
     ]
     resources = [
       "arn:aws:bedrock:*::foundation-model/anthropic.*",
+      "arn:aws:bedrock:*::foundation-model/amazon.nova*",
       "arn:aws:bedrock:*:*:inference-profile/*anthropic.*",
     ]
   }

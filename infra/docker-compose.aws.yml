@@ -33,7 +33,7 @@ services:
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
       SESSION_SECRET: ${SESSION_SECRET}
       AWS_REGION: ${AWS_REGION:-us-east-1}
-      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-amazon.nova-pro-v1:0}
       STATEMENT_TIMEOUT_MS: ${STATEMENT_TIMEOUT_MS:-8000}
     ports:
       - "80:8000"

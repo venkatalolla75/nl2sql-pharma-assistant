@@ -60,7 +60,7 @@ variable "key_pair_name" {
 
 variable "bedrock_model_id" {
   type    = string
-  default = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+  default = "amazon.nova-pro-v1:0"
 }
 
 variable "budget_monthly_limit_usd" {

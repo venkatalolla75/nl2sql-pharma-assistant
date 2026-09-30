@@ -14,7 +14,7 @@ flowchart TB
     end
 
     subgraph Bedrock["Amazon Bedrock"]
-        Claude["Claude (Converse API)<br/>NL→SQL, then SQL+rows→NL answer"]
+        Claude["Nova Pro (Converse API)<br/>NL→SQL, then SQL+rows→NL answer"]
     end
 
     subgraph RDS["RDS PostgreSQL (private subnet)"]
@@ -94,8 +94,28 @@ Every fact in `docs/*.md` that affects query correctness was distilled into
 
 ## LLM provider and prompt design
 
-**Amazon Bedrock, Anthropic Claude**, via `boto3`'s `bedrock-runtime` Converse API
-(`backend/app/bedrock.py`). Two calls per turn, deliberately kept separate:
+**Amazon Bedrock**, via `boto3`'s `bedrock-runtime` Converse API (`backend/app/bedrock.py`),
+model selected by the `BEDROCK_MODEL_ID` env var (defaults to `amazon.nova-pro-v1:0`) so
+swapping providers/models is a config change, not a code change — the Converse API and the
+rest of `bedrock.py` are provider-agnostic.
+
+**Model choice: Amazon Nova Pro, not Anthropic Claude.** Claude was the original choice and
+the code was written/tested against it (see the Blockers Log) — `sonnet-4-5` via Bedrock's
+`us.*` cross-region inference profile generated correct SQL in manual testing. But once real
+AWS credentials were in place, every `Converse` call against the Anthropic models on this
+account failed with `AccessDeniedException: ... not authorized to perform the required AWS
+Marketplace actions (aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe) ...`. This
+persisted identically for both the deploying IAM user (which has full `AdministratorAccess`,
+ruling out an IAM permissions gap) and the EC2 instance role, and recurred on retry after the
+5+ minutes AWS's own error message suggests waiting — pointing to an account-level Marketplace
+entitlement restriction (common on new/free-tier accounts) rather than anything fixable in this
+repo's IAM policy or code. Amazon Nova Pro is a first-party Bedrock model fulfilled directly by
+AWS rather than through an AWS Marketplace listing, works on-demand (no inference profile
+needed), and hit none of these issues. `infra/iam.tf` authorizes both `anthropic.*` and
+`amazon.nova*` model/inference-profile ARNs, so switching back to Claude once/if the Marketplace
+restriction clears is just a `BEDROCK_MODEL_ID` change.
+
+Two calls per turn, deliberately kept separate:
 
 1. **`generate_sql`** — system prompt (domain rules + few-shot + role/scope) + replayed
    history + the new question → raw SQL text only, `temperature=0` for determinism. If
@@ -163,8 +183,8 @@ attempts.
 |---|---|
 | **RDS PostgreSQL** (`db.t4g.micro`, single-AZ, private subnet) | Free-tier-eligible; RLS/grants as above |
 | **EC2** (`t3.micro`, public subnet) | Runs the Dockerized FastAPI app; free-tier-eligible |
-| **Bedrock** (Claude, Converse API) | NL→SQL + answer generation |
-| **IAM instance role** | `bedrock:InvokeModel(WithResponseStream)` scoped to `anthropic.*` foundation models, plus SSM Session Manager (no SSH key / open port 22 needed) |
+| **Bedrock** (Amazon Nova Pro, Converse API) | NL→SQL + answer generation — see "Model choice" above for why Nova over Claude |
+| **IAM instance role** | `bedrock:InvokeModel(WithResponseStream)` scoped to `anthropic.*` and `amazon.nova*` foundation models/inference-profiles, plus SSM Session Manager (no SSH key / open port 22 needed) |
 | **VPC** (2 AZ, public+private subnets, **no NAT Gateway**) | RDS never initiates outbound connections, so a NAT Gateway (~$32/mo) was cut entirely — EC2 gets its own public IP for outbound pulls |
 | **AWS Budgets** | Monthly cost budget with 80%/100% email alerts |
 

@@ -17,6 +17,8 @@ crash.log
 crash.*.log
 *.tfvars
 *.tfvars.json
+tfplan
+*.tfplan
 
 # Generated data
 *.csv

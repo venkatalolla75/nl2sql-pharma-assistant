@@ -2,15 +2,23 @@
 set -euxo pipefail
 exec > >(tee /var/log/user-data.log) 2>&1
 
-# --- Docker + Compose plugin + git + python3 (Amazon Linux 2023) ---
+# --- Docker + Compose/buildx plugins + git + python3 (Amazon Linux 2023) ---
 dnf install -y docker git python3
 systemctl enable --now docker
 usermod -aG docker ec2-user
 
+# docker-buildx-plugin isn't in the AL2023 repos, so `docker compose build` (which
+# shells out to buildx) fails without this — fetch the CLI plugin binary directly,
+# same as the compose plugin below.
 mkdir -p /usr/local/lib/docker/cli-plugins
 curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
   -o /usr/local/lib/docker/cli-plugins/docker-compose
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+BUILDX_TAG=$(python3 -c "import json,urllib.request; print(json.load(urllib.request.urlopen('https://api.github.com/repos/docker/buildx/releases/latest'))['tag_name'])")
+curl -SL "https://github.com/docker/buildx/releases/download/$${BUILDX_TAG}/buildx-$${BUILDX_TAG}.linux-amd64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-buildx
+chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # --- Fetch app code ---
 mkdir -p /opt/app

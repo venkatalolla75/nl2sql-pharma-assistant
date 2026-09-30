@@ -22,6 +22,7 @@ data "aws_iam_policy_document" "bedrock_invoke" {
     ]
     resources = [
       "arn:aws:bedrock:*::foundation-model/anthropic.*",
+      "arn:aws:bedrock:*:*:inference-profile/*anthropic.*",
     ]
   }
 }

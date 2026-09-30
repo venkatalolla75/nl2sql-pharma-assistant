@@ -96,7 +96,7 @@ resource "aws_security_group" "ec2" {
 
 resource "aws_security_group" "rds" {
   name        = "${var.project_name}-rds-sg"
-  description = "RDS Postgres — inbound only from the app EC2 security group"
+  description = "RDS Postgres - inbound only from the app EC2 security group"
   vpc_id      = aws_vpc.main.id
 
   ingress {

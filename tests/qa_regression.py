@@ -293,6 +293,24 @@ CHAT_TESTS = [
         ("Who are our top 10 accounts by volume this year?",
          [ok(), min_rows(1), max_rows(10)]),
     ]),
+    # No period named at all (distinct from TC04's "this year") - the exact live bug
+    # report: timed out because the model's own SQL had no offset filter and the
+    # prompt-level default-period instruction didn't get applied. Fixed with a backend
+    # backstop (sql_guard.ensure_default_period); these must not time out, and should
+    # state the default period that got applied.
+    ("TC26", "Accuracy", "exec", [
+        ("Who are our top 10 accounts by volume?",
+         [ok(), min_rows(1), max_rows(10), mentions_period()]),
+    ]),
+    ("TC27", "Accuracy", "exec", [
+        ("What are our top accounts?", [ok(), min_rows(1), mentions_period()]),
+    ]),
+    ("TC28", "Accuracy", "exec", [
+        ("Who are our best customers?", [ok(), min_rows(1), mentions_period()]),
+    ]),
+    ("TC29", "Accuracy", "exec", [
+        ("What are our biggest accounts by units?", [ok(), min_rows(1), mentions_period()]),
+    ]),
     ("TC05", "Multi-turn", "exec", [
         ("Show total units by region this year", [ok(), min_rows(6)]),
         ("Only show the top 2", [ok(), min_rows(1), max_rows(2)]),

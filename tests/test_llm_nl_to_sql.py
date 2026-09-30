@@ -59,10 +59,15 @@ def test_exec_total_volume_this_month(login, users, report):
 
 def test_exec_hub_dispense_free_drug_excluded_from_default_volume(login, users, report):
     question = "How much free drug (hub dispense) did we provide for Cyclonova?"
+    # No period named -> backend-enforced default (sql_guard.ensure_default_period)
+    # applies R3M even when the model's own SQL doesn't filter by one; see TESTS.md's
+    # "top accounts" timeout bug for why this is now enforced server-side, not just by
+    # the prompt (and test_sql_guard.py for the injection logic itself).
     with scoped_cursor("exec", None, None) as cur:
         cur.execute(
             "SELECT SUM(pack_units) FROM sales "
-            "WHERE data_source='hub_dispense' AND drug_name='CYCLONOVA'"
+            "WHERE data_source='hub_dispense' AND drug_name='CYCLONOVA' "
+            "AND mo_offset IN (0,1,2)"
         )
         expected = float(cur.fetchone()[0] or 0)
 
@@ -84,6 +89,11 @@ def test_exec_hub_dispense_free_drug_excluded_from_default_volume(login, users, 
 
 def test_market_share_uses_distributor_over_market_data(login, users, report):
     question = "What is our market share for Zenovax in the Docetaxel market?"
+    # No period named -> backend-enforced default applies R3M to BOTH sides of the
+    # ratio symmetrically (sql_guard.ensure_default_period handles every WHERE clause
+    # independently specifically so numerator/denominator stay matched - an earlier,
+    # simpler version of that function only patched the first WHERE, which would have
+    # broken this exact case; see test_sql_guard.py's symmetric-injection test).
     with scoped_cursor("exec", None, None) as cur:
         cur.execute(
             """
@@ -91,12 +101,12 @@ def test_market_share_uses_distributor_over_market_data(login, users, report):
               (SELECT SUM(s.pack_units * p.unit_conversion_factor)
                FROM sales s JOIN products p ON s.ndc = p.ndc
                WHERE s.data_source='distributor' AND s.brand_flag=1
-                 AND p.market_subcategory='Docetaxel')
+                 AND p.market_subcategory='Docetaxel' AND s.mo_offset IN (0,1,2))
               /
               NULLIF((SELECT SUM(s.pack_units * p.unit_conversion_factor)
                FROM sales s JOIN products p ON s.ndc = p.ndc
                WHERE s.data_source='market_data'
-                 AND p.market_subcategory='Docetaxel'), 0)
+                 AND p.market_subcategory='Docetaxel' AND s.mo_offset IN (0,1,2)), 0)
             """
         )
         expected = float(cur.fetchone()[0])

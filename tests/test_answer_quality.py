@@ -14,6 +14,11 @@ Regression tests for four bugs found testing the live deployment as an Exec:
 4. Revenue/sales figures must follow docs/data_source_guide.md and
    docs/metric_definitions.md: paid demand only (data_source='distributor' AND
    brand_flag=1), hub_dispense and market_data excluded by default.
+5. "Who are our top 10 accounts by volume?" (no period named) timed out — the
+   prompt-level default-period instruction is advisory, and the model has
+   repeatedly just not followed it. Fixed with a backend backstop
+   (sql_guard.ensure_default_period) that injects the default filter into the
+   validated SQL when the model's own query never filtered by an offset column.
 
 Requires AWS credentials with Bedrock access (skipped otherwise — see conftest.py).
 """
@@ -302,5 +307,37 @@ def test_wac_revenue_question_excludes_hub_dispense_and_market_data(login, users
         ok, question="What's our WAC revenue this month?", sql=body.get("sql"),
         expected=f"~{expected} (distributor, brand_flag=1, mo_offset=0 only)",
         actual=f"{actual} (full answer: {body.get('answer')!r})",
+    )
+    assert ok, body
+
+
+# ---------------------------------------------------------------------------
+# Issue 5 — "top accounts" with NO period named at all must not time out, even
+# when the model forgets the prompt-level default-period instruction; the backend
+# (sql_guard.ensure_default_period) is the backstop, not just the prompt.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("question", [
+    "Who are our top 10 accounts by volume?",  # the exact live bug report
+    "What are our top accounts?",
+    "Who are our best customers?",
+    "What are our biggest accounts by units?",
+])
+def test_no_period_account_questions_do_not_time_out(question, login, users, report):
+    c = login(users["exec"])
+    resp = c.post("/chat", json={"message": question, "show_sql": True})
+    body = resp.json()
+    ok = (
+        resp.status_code == 200
+        and body.get("row_count", 0) > 0
+        and "error" not in body
+    )
+    report.record(
+        "NL-to-SQL Accuracy", f"No-period account question: {question!r}", ok,
+        question=question, sql=body.get("sql"),
+        expected="succeeds (200, rows returned, no error) - backend enforces a "
+                 "default period even if the model's own SQL doesn't filter by one",
+        actual=f"status={resp.status_code} row_count={body.get('row_count')} "
+               f"error={body.get('error')!r} answer={body.get('answer')!r}",
     )
     assert ok, body

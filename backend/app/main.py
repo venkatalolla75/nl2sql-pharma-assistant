@@ -15,7 +15,7 @@ from app import bedrock
 from app.auth import authenticate, get_user_by_id
 from app.db import scoped_cursor
 from app.periods import period_note as _period_note
-from app.sql_guard import SqlValidationError, validate_and_finalize
+from app.sql_guard import SqlValidationError, ensure_default_period, validate_and_finalize
 
 app = FastAPI(title="NovaPharma NL-to-SQL Assistant")
 
@@ -187,6 +187,14 @@ def chat(body: ChatRequest, request: Request):
 
     try:
         final_sql = validate_and_finalize(raw_sql, user["role"])
+        # Backend backstop, not just a prompt instruction: the model is told to default
+        # unscoped questions to R3M, but has been observed simply not doing it (e.g.
+        # "top accounts by volume" with no period named), scanning all 2M/3 years of
+        # sales and hitting the statement timeout. If the validated SQL touches `sales`
+        # but never filters by an offset column, enforce the default here. _period_note
+        # (below) picks up the injected filter automatically and tells generate_answer
+        # to state the period, same as an LLM-written one would.
+        final_sql, _ = ensure_default_period(final_sql)
     except SqlValidationError as exc:
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": raw_sql})

@@ -31,6 +31,90 @@ _WAC_COLUMN = re.compile(r"\bwac\b", re.IGNORECASE)
 
 _LIMIT_CLAUSE = re.compile(r"\blimit\s+\d+\s*;?\s*$", re.IGNORECASE)
 
+# --- Default time period enforcement ---------------------------------------------
+# The prompt tells the model to default unscoped questions to R3M (last 3 months), but
+# that's advisory — a model can simply forget, and "top accounts by volume" (no period
+# named) has repeatedly done exactly that, scanning all 2M/3-years of sales and hitting
+# the statement timeout. This is the backend backstop: if the generated SQL touches
+# `sales` but never filters by an offset column anywhere, inject one. It's a text-level
+# patch, not a SQL parser, but it handles multi-scope queries (a CTE plus a main query,
+# or two subqueries like a market-share ratio's numerator/denominator) by treating each
+# WHERE clause as its own scope — inject into EVERY WHERE whose immediately-preceding
+# FROM/JOIN touches `sales` and whose own predicate list doesn't already have an offset
+# filter. An earlier single-injection version only fixed the first WHERE, silently
+# reintroducing the exact asymmetric-period bug (R3M numerator vs. all-time denominator)
+# fixed by prompt engineering last session — caught by test_market_share_uses_distributor
+# _over_market_data before this shipped; see the test for the two-subquery repro case.
+DEFAULT_PERIOD_MO_OFFSETS = "0,1,2"  # R3M — must match periods.py's own R3M pattern
+
+_SALES_TABLE = re.compile(r"\bsales\b", re.IGNORECASE)
+_OFFSET_COLUMN = re.compile(r"\b(mo_offset|wk_offset)\b", re.IGNORECASE)
+_SALES_ALIAS = re.compile(r"\bsales\s+(?:as\s+)?([a-zA-Z_]\w*)\b", re.IGNORECASE)
+_WHERE_KEYWORD = re.compile(r"\bwhere\b", re.IGNORECASE)
+_CLAUSE_BOUNDARY = re.compile(r"\b(group\s+by|order\s+by|limit)\b", re.IGNORECASE)
+_SQL_KEYWORDS = {
+    "where", "group", "order", "join", "on", "left", "right", "inner", "outer",
+    "full", "cross", "limit", "union", "as", "and", "or", "select", "from",
+}
+
+
+def _period_filter_expr(scope_text: str) -> str:
+    alias_match = _SALES_ALIAS.search(scope_text)
+    alias = alias_match.group(1) if alias_match else None
+    if alias and alias.lower() in _SQL_KEYWORDS:
+        alias = None  # "FROM sales WHERE ..." - "where" isn't an alias
+    return (
+        f"{alias}.mo_offset IN ({DEFAULT_PERIOD_MO_OFFSETS})" if alias
+        else f"mo_offset IN ({DEFAULT_PERIOD_MO_OFFSETS})"
+    )
+
+
+def ensure_default_period(sql: str) -> tuple[str, bool]:
+    """Returns (sql, defaulted) - sql unchanged if nothing needed it; otherwise sql
+    with a default `mo_offset IN (0,1,2)` filter injected into every WHERE clause that
+    scopes a `sales` reference and doesn't already filter by an offset column, and
+    defaulted=True, so the caller can make sure the answer states that a default period
+    was applied.
+
+    Known gap: a sales-touching scope that has NO WHERE clause of its own, while some
+    OTHER scope earlier in the query does (e.g. a CTE base query filtering products),
+    won't get a filter injected — inserting a brand-new WHERE clause at the right point
+    for an arbitrary later scope needs real parsing, not regex. Hasn't shown up in any
+    reported bug (every observed case has a WHERE on every sales-touching scope, or has
+    none anywhere in the whole query, both of which this function handles), so not
+    chased further; falls back to the prompt-level default same as before this existed.
+    """
+    if not _SALES_TABLE.search(sql):
+        return sql, False
+
+    wheres = list(_WHERE_KEYWORD.finditer(sql))
+
+    if not wheres:
+        if _OFFSET_COLUMN.search(sql):
+            return sql, False
+        filter_expr = _period_filter_expr(sql)
+        boundary_match = _CLAUSE_BOUNDARY.search(sql)
+        i = boundary_match.start() if boundary_match else len(sql)
+        return f"{sql[:i]} WHERE {filter_expr} {sql[i:]}", True
+
+    insertions = []  # (position, filter_expr), rightmost-first so offsets stay valid
+    scope_start = 0
+    for idx, wm in enumerate(wheres):
+        before = sql[scope_start:wm.start()]  # this scope's FROM/JOIN clause(s)
+        next_start = wheres[idx + 1].start() if idx + 1 < len(wheres) else len(sql)
+        after = sql[wm.end():next_start]  # this WHERE's own predicate list
+        if _SALES_TABLE.search(before) and not _OFFSET_COLUMN.search(after):
+            insertions.append((wm.end(), _period_filter_expr(before)))
+        scope_start = wm.end()
+
+    if not insertions:
+        return sql, False
+
+    result = sql
+    for pos, filter_expr in sorted(insertions, key=lambda x: -x[0]):
+        result = f"{result[:pos]} {filter_expr} AND{result[pos:]}"
+    return result, True
+
 
 class SqlValidationError(Exception):
     def __init__(self, message: str, user_message: str):

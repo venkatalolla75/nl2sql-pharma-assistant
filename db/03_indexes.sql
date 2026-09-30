@@ -17,6 +17,14 @@ CREATE INDEX IF NOT EXISTS idx_orgs_zip             ON organizations (zip);
 CREATE INDEX IF NOT EXISTS idx_orgs_grandparent     ON organizations (grandparent_org_id);
 CREATE INDEX IF NOT EXISTS idx_orgs_parent          ON organizations (parent_org_id);
 CREATE INDEX IF NOT EXISTS idx_orgs_gpo             ON organizations (gpo_name);
+-- Expression index matching the COALESCE(grandparent_org_name, org_name) "account name"
+-- rollup every few-shot example (and therefore the model) uses. Doesn't get scanned
+-- directly by the plans we've seen, but the fresher statistics it brings via ANALYZE
+-- flip the planner from a disk-spilling sort-based GroupAggregate to a HashAggregate
+-- for this GROUP BY - measured ~6x faster (2580ms -> ~400ms) on an unfiltered,
+-- all-3-years account rollup, the most expensive realistic case for this query shape.
+CREATE INDEX IF NOT EXISTS idx_orgs_account_name
+    ON organizations (COALESCE(grandparent_org_name, org_name));
 
 -- products: market classification lookups
 CREATE INDEX IF NOT EXISTS idx_products_subcategory ON products (market_subcategory);

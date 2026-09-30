@@ -171,6 +171,10 @@ fail fast and produce friendly errors, not because they're trusted alone.
    (`_access_note` in `main.py`) detects revenue-flavored questions from non-Exec users
    and asks the answer-generation call to explain the substitution, rather than
    silently returning units with no context.
+9. **Per-user rate limit**: 60 `/chat` requests/hour, a sliding window keyed by
+   `user_id` (`_rate_limit_ok` in `main.py`), checked before any Bedrock call — caps both
+   brute-force-style abuse of the shared demo login and per-user Bedrock spend. In-memory
+   like `_conversations`, so the same caveat applies (see trade-offs below).
 
 See `tests/test_db_security.py` for the tests that exercise every one of these directly
 against the live database (not mocked), and `tests/test_llm_security_and_edge_cases.py`
@@ -183,6 +187,7 @@ attempts.
 |---|---|
 | **RDS PostgreSQL** (`db.t4g.micro`, single-AZ, private subnet) | Free-tier-eligible; RLS/grants as above |
 | **EC2** (`t3.micro`, public subnet) | Runs the Dockerized FastAPI app; free-tier-eligible |
+| **Elastic IP** | Attached to the app instance so the public URL is stable across EC2 replacements — this build replaced the instance several times to pick up fixes, and the URL changed every time before this was added |
 | **Bedrock** (Amazon Nova Pro, Converse API) | NL→SQL + answer generation — see "Model choice" above for why Nova over Claude |
 | **IAM instance role** | `bedrock:InvokeModel(WithResponseStream)` scoped to `anthropic.*` and `amazon.nova*` foundation models/inference-profiles, plus SSM Session Manager (no SSH key / open port 22 needed) |
 | **VPC** (2 AZ, public+private subnets, **no NAT Gateway**) | RDS never initiates outbound connections, so a NAT Gateway (~$32/mo) was cut entirely — EC2 gets its own public IP for outbound pulls |
@@ -192,9 +197,9 @@ Full Terraform in `infra/`; see README.md for `terraform apply` steps.
 
 ## Trade-offs and what I'd improve with more time
 
-- **In-memory conversation history** (`_conversations` dict in `main.py`) is lost on
-  app restart and doesn't scale past one instance. A real deployment would move this to
-  Redis or a `sessions` table.
+- **In-memory conversation history and rate-limit state** (`_conversations` and
+  `_chat_request_times` dicts in `main.py`) are lost on app restart and don't scale past
+  one instance. A real deployment would move both to Redis or a `sessions` table.
 - **Demo auth is a single shared password** for all 23 seeded users (bcrypt-hashed,
   Terraform-generated, never hardcoded) rather than per-user credentials or SSO — the
   assignment's `users` table ships with no password column at all, so *some* convention

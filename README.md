@@ -7,10 +7,13 @@ test results, and **[DEMO_SCRIPT.md](DEMO_SCRIPT.md)** for a guided walkthrough.
 
 ## Live deployment
 
-**http://44.222.157.226** — log in with any seeded user's email (see `db/load_data.py`
-for the full list) and the shared demo password (ask whoever deployed this for the
-current `terraform output -raw demo_user_password`, since it's a generated secret, not
-committed). One user per role to try:
+**http://34.206.93.198** — an Elastic IP, so this URL stays fixed across redeploys
+(earlier in this build it changed several times as the EC2 instance got replaced to pick
+up fixes; that's no longer the case). Log in with any seeded user's email (see
+`db/load_data.py` for the full list) and the shared demo password — either
+`terraform output -raw demo_user_password`, or `DEFAULT_DEMO_PASSWORD` in
+`tests/qa_regression.py` (committed deliberately for this review; see "Rotating the demo
+password" below). One user per role to try:
 
 | Role | Email |
 |---|---|
@@ -19,7 +22,8 @@ committed). One user per role to try:
 | RAM (New York Metro) | `amy.nguyen@novapharma.com` |
 
 This is a take-home-assignment deployment on a single free-tier-sized EC2 instance with
-no autoscaling/HA — expect it to be torn down after review.
+no autoscaling/HA — expect it to be torn down after review. `/chat` is capped at 60
+questions/hour per user (see `backend/app/main.py`'s `_rate_limit_ok`).
 
 ## Setup — local (Docker)
 
@@ -77,6 +81,54 @@ Tests that need a *direct* Postgres connection (RLS/column-grant checks, and bas
 "expected" values for some NL-to-SQL accuracy tests) skip cleanly in this mode — RDS has
 no public/bastion access by design, so that's expected, not a gap. Writes `TESTS_LIVE.md`
 instead of overwriting `TESTS.md`.
+
+### Black-box QA script (tests/qa_regression.py)
+
+A standalone script (not a pytest module) that drives the deployed app exactly like a
+browser — logs in as each role over real HTTP and checks every answer for accuracy, role
+scoping, WAC blocking, multi-turn follow-ups, prompt injection, and edge cases. Useful for
+a from-a-browser-style sanity pass against a live URL without spinning up the local stack.
+
+```bash
+pip install -r tests/requirements.txt   # or just: pip install requests
+python tests/qa_regression.py           # defaults to the live URL above
+```
+
+Override the target or password without editing the file:
+
+```bash
+python tests/qa_regression.py --base-url http://<some-other-host> --password <pw>
+# or via env vars:
+APP_URL=http://<some-other-host> DEMO_PASSWORD=<pw> python tests/qa_regression.py
+```
+
+Writes a Markdown + CSV report to `qa_reports/` and exits non-zero if anything FAILs
+(WARN-level findings don't fail the run — see the script's own docstring for the
+PASS/FAIL/WARN distinction).
+
+## Rotating the demo password
+
+The demo password is never stored in plaintext in the database — only a bcrypt hash
+(`users.password_hash`), computed at load time by `db/load_data.py` from the
+`DEMO_USER_PASSWORD` env var. Re-running the loader with a new value rotates every seeded
+user's password in place (`ON CONFLICT (user_id) DO UPDATE SET password_hash = ...` —
+this used to be `DO NOTHING`, which silently made rotation a no-op for already-seeded
+users; fixed so this procedure actually works). To rotate it:
+
+1. Pick a new password.
+2. Update `tests/qa_regression.py`'s `DEFAULT_DEMO_PASSWORD` (and anywhere else you've
+   shared the old one) so the QA script keeps working.
+3. Re-run the loader against the live RDS with the new password. Simplest path: force a
+   fresh EC2 instance, which re-runs `user-data` (including the loader) against
+   Terraform's `random_password.demo_user` — `terraform apply -replace="aws_instance.app"`
+   in `infra/` picks up a newly-generated password automatically, since that resource
+   isn't pinned to a fixed value. Note the EC2 IP stays fixed now (Elastic IP), so this
+   is just a password rotation, not a URL change.
+   Alternatively, without replacing the instance: connect to RDS from something inside
+   the VPC (its security group only accepts inbound from the EC2 instance, by design —
+   no public/bastion access) and re-run `db/load_data.py` directly with
+   `DEMO_USER_PASSWORD` set to the new value.
+4. Confirm the old password no longer logs in and the new one does.
 
 ## Deploying to AWS (Terraform)
 

@@ -533,7 +533,7 @@ def write_reports(results, report_dir, base):
 
 def main():
     ap = argparse.ArgumentParser(description="NovaPharma NL-to-SQL QA regression suite")
-    ap.add_argument("--base-url", default=os.environ.get("APP_URL", "http://44.222.157.226"))
+    ap.add_argument("--base-url", default=os.environ.get("APP_URL", "http://34.206.93.198"))
     ap.add_argument("--password",
                     default=os.environ.get("DEMO_PASSWORD", DEFAULT_DEMO_PASSWORD),
                     help="demo password (defaults to the shared demo password; "

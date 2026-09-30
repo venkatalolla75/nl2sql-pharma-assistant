@@ -160,6 +160,9 @@ def main():
             )
 
             print("=== Seeding users ===")
+            # ON CONFLICT ... DO UPDATE (not DO NOTHING) so re-running this script with a
+            # new DEMO_USER_PASSWORD actually rotates existing users' password_hash —
+            # see README's "Rotating the demo password".
             pw_hash = bcrypt.hashpw(demo_password.encode(), bcrypt.gensalt()).decode()
             cur.executemany(
                 """
@@ -167,7 +170,7 @@ def main():
                     (user_id, email, full_name, role, territory_name, region_name,
                      can_view_wac, password_hash)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO NOTHING
+                ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash
                 """,
                 [(u[0], u[1], u[2], u[3], u[4], u[5], u[6], pw_hash) for u in SEEDED_USERS],
             )

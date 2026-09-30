@@ -31,7 +31,7 @@ variable "ec2_instance_type" {
 }
 
 variable "rds_instance_class" {
-  description = "Free-tier eligible by default."
+  description = "Free-tier eligible by default. db.t4g.small would give more buffer cache headroom, but this AWS account's free-tier plan rejects it outright (FreeTierRestrictionError on ModifyDBInstance) - blocked until the account's billing plan is upgraded or a support request lifts the restriction; see PLAN.md blockers. The default-period backend enforcement + db/03_indexes.sql's account-name expression index (see git log) already fixed the reported timeout without needing this, so it's not urgent."
   type        = string
   default     = "db.t4g.micro"
 }

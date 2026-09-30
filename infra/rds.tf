@@ -27,6 +27,13 @@ resource "aws_db_instance" "main" {
   storage_type      = "gp3"
   storage_encrypted = true
 
+  # Without this, an instance_class change (or any other modifiable-in-place change)
+  # only takes effect at the next maintenance window, not on `terraform apply` - not
+  # what you want when sizing up specifically to fix a live timeout. Causes a brief
+  # (a few minutes) reboot for class changes; does not affect stored data or the
+  # endpoint/Elastic IP.
+  apply_immediately = true
+
   db_name  = var.db_name
   username = "pgadmin"
   password = random_password.rds_master.result

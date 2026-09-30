@@ -223,6 +223,15 @@ Full Terraform in `infra/`; see README.md for `terraform apply` steps.
   hand-crafted adversarial query with trailing comments could in principle confuse the
   regex-based `LIMIT` detector. A real SQL AST parser (e.g. `sqlglot`) would close this
   gap.
+- **Synthetic `market_data` can imply >100% market share** for some product/period
+  combinations (verified: e.g. Cyclonova's Cyclophosphamide-class distributor volume one
+  quarter genuinely exceeds that quarter's `market_data` total for the same
+  subcategory in the generated dataset). Confirmed this isn't a query bug — the SQL is
+  numerically exact against the underlying rows (`54067.00 / 29614.50 = 1.8257`,
+  cross-checked by hand) — it's a property of `schema/generate_data.py`'s synthetic
+  numbers not always keeping distributor ≤ market_data locally in every narrow window.
+  A real dataset wouldn't have this property; worth a sanity-check clamp in a real system
+  but not something to paper over here.
 - **Secrets on EC2** land in a `.env` file written by `user_data` (readable by anyone
   with EC2 describe-instance-attribute access to that account) rather than pulled at
   runtime from Secrets Manager/SSM Parameter Store — acceptable for a scoped take-home,

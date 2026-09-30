@@ -101,14 +101,33 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
 
 10. When a ratio/multi-filter metric (market share, or any "X / Y where X and Y use
     different WHERE filters" calculation) needs to be broken down BY a dimension
-    (region, territory, product, period, account, ...), compute every branch in ONE pass
-    with conditional aggregation — SUM(CASE WHEN <filter A> THEN <expr> END) / NULLIF(
+    (region, territory, period, account, ...), compute every branch in ONE pass with
+    conditional aggregation — SUM(CASE WHEN <filter A> THEN <expr> END) / NULLIF(
     SUM(CASE WHEN <filter B> THEN <expr> END), 0) — GROUP BY that dimension. Never use a
     correlated subquery per group (a subquery inside the SELECT list referencing an outer
     GROUP BY column): it's fragile — easy to reference a column the subquery's own FROM
     clause doesn't have, or a column PostgreSQL rejects as "ungrouped" — and even when it
     is valid SQL, it re-executes once per group instead of once total. See the example
-    below; the same technique applies regardless of which dimension you're grouping by.
+    below; the same technique applies regardless of which dimension you're grouping by —
+    ***EXCEPT*** market share broken down by an individual PRODUCT of ours (drug_name),
+    which needs different handling: see rule 11.
+
+11. MARKET SHARE BY OUR OWN PRODUCT is a special case of rule 10, not a direct
+    application of it — market_data never carries rows under a NovaPharma product's own
+    ndc (it's competitor/market volume, not a per-NovaPharma-product estimate), so a
+    denominator matched by ndc/drug_name the same way the numerator is (rule 10's default
+    move) silently returns NULL for every single product — it looks like it ran, but it's
+    wrong. The denominator must instead match by market_subcategory (the actual
+    market-share definition, rule 2), computed ONCE per subcategory — e.g. in a CTE —
+    and joined in, not as a correlated subquery (measured ~15x slower, and easy to get
+    wrong the same way rule 10 warns about). See the example below.
+
+12. Any market-share ratio (single-product or broken down by a dimension, rules 2/10/11)
+    must apply the SAME time-period filter to both the numerator and the denominator if
+    the question names a period — a numerator scoped to one quarter divided by an
+    unfiltered all-time denominator produces a meaningless number (measured >100% market
+    share this way, which is impossible by definition). If you add a period filter/CTE
+    condition to one side, add the identical one to the other.
 """
 
 FEWSHOT_EXEC = """
@@ -143,20 +162,23 @@ Q: What's our market share by drug class?
 SQL: SELECT p.market_subcategory, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF(SUM(CASE WHEN s.data_source = 'market_data' THEN s.pack_units * p.unit_conversion_factor END), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc GROUP BY p.market_subcategory
 -- NOTE: broken down by a dimension -> single-pass conditional aggregation (rule 10),
 -- not a correlated subquery per group. The same technique works for any other
--- breakdown dimension (region, territory, account, period, ...) - just change what
--- you GROUP BY and join in whatever table gets you there (e.g. join organizations +
--- zip_territory to break down by region/territory instead of by product).
+-- breakdown dimension EXCEPT our own individual products (region, territory, account,
+-- period, ...) - just change what you GROUP BY and join in whatever table gets you
+-- there (e.g. join organizations + zip_territory for region/territory). For "by
+-- product"/"by drug"/"for each of our products" specifically, see rule 11 and the next
+-- example instead - GROUP BY p.drug_name needs the different denominator-matching
+-- rule 11 describes, not this one.
 
 Q: What's our market share for each of our own products?
-SQL: SELECT p.drug_name, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF((SELECT SUM(s2.pack_units * p2.unit_conversion_factor) FROM sales s2 JOIN products p2 ON s2.ndc = p2.ndc WHERE s2.data_source = 'market_data' AND p2.market_subcategory = p.market_subcategory), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc WHERE p.brand_flag = 1 GROUP BY p.drug_name, p.market_subcategory
--- NOTE: breaking market share down BY OUR OWN PRODUCT is different from rule 10's usual
--- case - market_data never carries rows under a NovaPharma product's own ndc (it's
--- competitor/market volume, not a per-NovaPharma-product estimate), so matching the
--- denominator by ndc/drug_name like the numerator would wrongly return NULL/0 for every
--- product. The denominator has to match by market_subcategory instead (the correct
--- market-share definition, rule 2) - a small, cheap correlated subquery here is fine
--- since it's correlating on market_subcategory (few distinct values), not one subquery
--- execution per raw row.
+SQL: WITH denom AS (SELECT p2.market_subcategory, SUM(s2.pack_units * p2.unit_conversion_factor) AS mkt_total FROM sales s2 JOIN products p2 ON s2.ndc = p2.ndc WHERE s2.data_source = 'market_data' GROUP BY p2.market_subcategory) SELECT p.drug_name, SUM(CASE WHEN s.data_source = 'distributor' AND s.brand_flag = 1 THEN s.pack_units * p.unit_conversion_factor END) / NULLIF(MAX(denom.mkt_total), 0) AS market_share FROM sales s JOIN products p ON s.ndc = p.ndc JOIN denom ON denom.market_subcategory = p.market_subcategory WHERE s.data_source = 'distributor' AND s.brand_flag = 1 GROUP BY p.drug_name
+-- NOTE: rule 11. Whenever the breakdown dimension is our own individual products
+-- (GROUP BY drug_name, ndc, or similar) rather than region/territory/period/account,
+-- use THIS shape, not the previous example's - market_data never carries rows under a
+-- NovaPharma product's own ndc, so matching the denominator by ndc/drug_name like the
+-- numerator silently returns NULL for every product. Match the denominator by
+-- market_subcategory instead, computed ONCE per subcategory in a CTE and joined in
+-- (not a correlated subquery in the SELECT list - measured ~15x slower, since that
+-- re-executes once per product instead of once total).
 
 Q: Show me the monthly volume trend for my largest account over the last 6 months
 SQL: SELECT s.period_mo, SUM(s.pack_units) AS total_units FROM sales s JOIN organizations o ON s.org_id = o.org_id WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.mo_offset BETWEEN 0 AND 5 AND COALESCE(o.grandparent_org_name, o.org_name) = (SELECT COALESCE(o2.grandparent_org_name, o2.org_name) FROM sales s2 JOIN organizations o2 ON s2.org_id = o2.org_id WHERE s2.data_source = 'distributor' AND s2.brand_flag = 1 GROUP BY COALESCE(o2.grandparent_org_name, o2.org_name) ORDER BY SUM(s2.pack_units) DESC LIMIT 1) GROUP BY s.period_mo ORDER BY s.period_mo

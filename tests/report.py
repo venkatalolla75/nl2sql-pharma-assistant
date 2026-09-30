@@ -32,8 +32,13 @@ def record(category, name, passed, question=None, sql=None, expected=None,
     return passed
 
 
-def render_markdown(pytest_outcomes: list[tuple[str, str]] | None = None) -> str:
+def render_markdown(pytest_outcomes: list[tuple[str, str]] | None = None,
+                     env_label: str | None = None) -> str:
     pytest_outcomes = pytest_outcomes or []
+    env_label = env_label or (
+        "FastAPI in-process + the local Postgres instance with the full 2M-row "
+        "dataset loaded"
+    )
     total = len(RESULTS)
     passed = sum(1 for r in RESULTS if r.passed)
 
@@ -60,9 +65,8 @@ def render_markdown(pytest_outcomes: list[tuple[str, str]] | None = None) -> str
         f"{passed}/{total} passed.**" + skipped_note,
         "",
         "Generated automatically by `tests/report.py` via a `pytest_sessionfinish` hook "
-        "— every row below reflects an actual run against the live app "
-        "(FastAPI in-process + the local Postgres instance with the full 2M-row "
-        "dataset loaded), not hand-written expectations.",
+        f"— every row below reflects an actual run against {env_label}, "
+        "not hand-written expectations.",
         "",
     ]
 

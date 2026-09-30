@@ -39,6 +39,32 @@ from app.main import app  # noqa: E402
 
 DEMO_PASSWORD = os.environ["DEMO_USER_PASSWORD"]
 
+# When set, HTTP-facing tests run for real against a deployed URL instead of an
+# in-process TestClient. Tests that need a *direct* Postgres connection (scoped_cursor)
+# skip cleanly in this mode — RDS is deliberately not reachable from outside the VPC (no
+# NAT/bastion, no SSH key by design; see infra/vpc.tf), so that isn't a gap to work
+# around, it's the security model working as intended. Those exact checks already run
+# against the identical 01/02/03_*.sql applied to RDS via the local suite.
+LIVE_URL = os.environ.get("LIVE_URL")
+
+if LIVE_URL:
+    import httpx
+    from contextlib import contextmanager
+
+    import app.db as _db_module
+
+    @contextmanager
+    def _scoped_cursor_unavailable_live(*_args, **_kwargs):
+        pytest.skip(
+            "direct DB access not available against a live deployment - RDS has no "
+            "public/bastion access by design (see infra/vpc.tf); this exact check runs "
+            "in the local suite against the identical schema/security SQL applied to RDS"
+        )
+        yield  # pragma: no cover - unreachable, pytest.skip() raises above
+
+    _db_module.scoped_cursor = _scoped_cursor_unavailable_live
+
+
 # email -> (role, territory_name, region_name)
 USERS = {
     "exec": "sarah.chen@novapharma.com",
@@ -48,9 +74,15 @@ USERS = {
 }
 
 
+def _new_client():
+    if LIVE_URL:
+        return httpx.Client(base_url=LIVE_URL, timeout=30.0)
+    return TestClient(app)
+
+
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return _new_client()
 
 
 @pytest.fixture
@@ -60,8 +92,8 @@ def users():
 
 @pytest.fixture
 def login():
-    def _login(email: str) -> TestClient:
-        c = TestClient(app)
+    def _login(email: str):
+        c = _new_client()
         r = c.post("/login", json={"email": email, "password": DEMO_PASSWORD})
         assert r.status_code == 200, f"login failed for {email}: {r.text}"
         return c
@@ -106,9 +138,21 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    out_path = ROOT / "TESTS.md"
+    if LIVE_URL:
+        out_path = ROOT / "TESTS_LIVE.md"
+        env_label = (
+            f"the deployed AWS app at {LIVE_URL} (real HTTP calls over the network to "
+            "EC2 -> RDS/Bedrock, not in-process). Tests needing a direct Postgres "
+            "connection (RLS/column-grant checks) skip here — RDS has no public/bastion "
+            "access by design; that exact enforcement is verified in TESTS.md instead, "
+            "which applies the identical schema/security SQL used on RDS"
+        )
+    else:
+        out_path = ROOT / "TESTS.md"
+        env_label = None
     out_path.write_text(
-        _report.render_markdown(pytest_outcomes=_PYTEST_OUTCOMES), encoding="utf-8"
+        _report.render_markdown(pytest_outcomes=_PYTEST_OUTCOMES, env_label=env_label),
+        encoding="utf-8",
     )
     print(f"\nWrote {out_path} ({len(_report.RESULTS)} rich cases, "
           f"{len(_PYTEST_OUTCOMES)} total pytest results)")

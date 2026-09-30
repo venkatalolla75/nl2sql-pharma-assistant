@@ -5,6 +5,22 @@ This repo is a completed implementation of the assignment described below. See
 **[DESIGN.md](DESIGN.md)** for architecture/trade-offs, **[TESTS.md](TESTS.md)** for
 test results, and **[DEMO_SCRIPT.md](DEMO_SCRIPT.md)** for a guided walkthrough.
 
+## Live deployment
+
+**http://44.222.157.226** — log in with any seeded user's email (see `db/load_data.py`
+for the full list) and the shared demo password (ask whoever deployed this for the
+current `terraform output -raw demo_user_password`, since it's a generated secret, not
+committed). One user per role to try:
+
+| Role | Email |
+|---|---|
+| Exec | `sarah.chen@novapharma.com` |
+| Director (Northeast) | `jennifer.walsh@novapharma.com` |
+| RAM (New York Metro) | `amy.nguyen@novapharma.com` |
+
+This is a take-home-assignment deployment on a single free-tier-sized EC2 instance with
+no autoscaling/HA — expect it to be torn down after review.
+
 ## Setup — local (Docker)
 
 Prerequisites: Docker, Python 3 (for the data generator only), AWS credentials with
@@ -46,6 +62,22 @@ Writes/overwrites `TESTS.md` at the repo root every run. DB-security and SQL-val
 tests run regardless of AWS credentials; NL-to-SQL accuracy and live security/edge-case
 tests require Bedrock access and are skipped (not failed) otherwise.
 
+To run the same suite against a live deployment instead of the local stack, set `LIVE_URL`
+and the live deployment's `DEMO_USER_PASSWORD` (from `terraform output -raw
+demo_user_password`, not your local `.env` value):
+
+```bash
+docker compose --profile test run --rm \
+  -e LIVE_URL=http://<your-live-host> \
+  -e DEMO_USER_PASSWORD=<live-deployment-password> \
+  tester
+```
+
+Tests that need a *direct* Postgres connection (RLS/column-grant checks, and baseline
+"expected" values for some NL-to-SQL accuracy tests) skip cleanly in this mode — RDS has
+no public/bastion access by design, so that's expected, not a gap. Writes `TESTS_LIVE.md`
+instead of overwriting `TESTS.md`.
+
 ## Deploying to AWS (Terraform)
 
 ```bash
@@ -60,9 +92,12 @@ terraform output -raw demo_user_password  # shared login password for all seeded
 ```
 
 Requires: AWS credentials with permission to create VPC/RDS/EC2/IAM/Budgets resources,
-and Bedrock model access (the Anthropic Claude model you configure via
-`var.bedrock_model_id`) enabled in the target region's Bedrock console — this is a
-one-time manual opt-in per AWS account/region that Terraform cannot do for you.
+and Bedrock model access (the model you configure via `var.bedrock_model_id`, default
+`amazon.nova-pro-v1:0`) enabled in the target region's Bedrock console — this is a
+one-time manual opt-in per AWS account/region that Terraform cannot do for you. If you'd
+rather use an Anthropic Claude model, `infra/iam.tf` already authorizes `anthropic.*` too
+— just override `bedrock_model_id`; see DESIGN.md's "Model choice" section for why Nova
+is the default here.
 
 To tear down: `terraform destroy` (not run as part of this build — see the project's
 `.claude/settings.json` guardrails, which block it from being run automatically).

@@ -3,7 +3,7 @@
 Living plan for the take-home assignment (source: https://github.com/cveeraiy/nl2sql-assignment).
 Updated as phases complete. See end of file for a running blocker log.
 
-## QA_REPORT.txt remediation — status (all code fixes done + full local suite green; live redeploy pending)
+## QA_REPORT.txt remediation — status (DONE: deployed live, verified against the live site)
 
 An external QA review (`QA_REPORT.txt`) found 2 critical, 4 high, and several medium/low
 issues against the full 2M-row dataset. Working through them in the report's suggested
@@ -13,7 +13,7 @@ complete before/after.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| C1 | RAM/Director can read any territory/region via `set_config()` in generated SQL | **Done** | Two-layer fix: (1) `sql_guard.py` now rejects `set_config`/`current_setting`/`SET`/`RESET`/`pg_sleep`/`dblink`/`lo_import`/`lo_export` + Unicode-escaped identifiers (`U&"..."`) that could spell a banned word past a text filter; (2) the real fix — `db/02_security.sql` RLS no longer reads a settable session GUC at all. Rewrote to ~22 per-scope Postgres LOGIN roles (`app_exec`, `app_director__<region>` ×6, `app_ram__<territory>` ×15), provisioned by `db/load_data.py`'s new `provision_scope_roles()` from the loaded `zip_territory` data, RLS keyed on `session_user` via a new `role_scope` table. `backend/app/db.py`'s `scoped_cursor()` now connects directly as the right per-scope role instead of `app_login` + `SET LOCAL ROLE` + `set_config()`. New `SCOPE_ROLE_PASSWORD` secret threaded through `docker-compose.yml`, `infra/`, `.env.example`. All 3 confirmed bypass payloads re-run directly against the DB (bypassing `sql_guard.py` entirely) after the fix: all return exactly the caller's own row count now. Tests: `test_db_security.py`'s `test_c1_*` (DB layer) + `test_sql_guard.py`'s `test_c1_*` (app layer). Also fixed in passing: `infra/templates/user_data.sh.tpl` was hardcoding `STATEMENT_TIMEOUT_MS=8000`, silently overriding the `20000` default set last session — the live deployment has actually been running at the old 8s limit this whole time (also fixed `infra/docker-compose.aws.yml`, which was initially missed — it needed the same `SCOPE_ROLE_PASSWORD` plumbing as the local compose file). **Committed locally** (`138c98f`). Not yet deployed — the new `SCOPE_ROLE_PASSWORD` secret and role-provisioning logic need a `terraform apply` + loader re-run against RDS to take effect live; deferred per the flight-mode constraint below. |
+| C1 | RAM/Director can read any territory/region via `set_config()` in generated SQL | **Done** | Two-layer fix: (1) `sql_guard.py` now rejects `set_config`/`current_setting`/`SET`/`RESET`/`pg_sleep`/`dblink`/`lo_import`/`lo_export` + Unicode-escaped identifiers (`U&"..."`) that could spell a banned word past a text filter; (2) the real fix — `db/02_security.sql` RLS no longer reads a settable session GUC at all. Rewrote to ~22 per-scope Postgres LOGIN roles (`app_exec`, `app_director__<region>` ×6, `app_ram__<territory>` ×15), provisioned by `db/load_data.py`'s new `provision_scope_roles()` from the loaded `zip_territory` data, RLS keyed on `session_user` via a new `role_scope` table. `backend/app/db.py`'s `scoped_cursor()` now connects directly as the right per-scope role instead of `app_login` + `SET LOCAL ROLE` + `set_config()`. New `SCOPE_ROLE_PASSWORD` secret threaded through `docker-compose.yml`, `infra/`, `.env.example`. All 3 confirmed bypass payloads re-run directly against the DB (bypassing `sql_guard.py` entirely) after the fix: all return exactly the caller's own row count now. Tests: `test_db_security.py`'s `test_c1_*` (DB layer) + `test_sql_guard.py`'s `test_c1_*` (app layer). Also fixed in passing: `infra/templates/user_data.sh.tpl` was hardcoding `STATEMENT_TIMEOUT_MS=8000`, silently overriding the `20000` default set last session — the live deployment has actually been running at the old 8s limit this whole time (also fixed `infra/docker-compose.aws.yml`, which was initially missed — it needed the same `SCOPE_ROLE_PASSWORD` plumbing as the local compose file). **Deployed and verified live** (`138c98f`, redeployed via `terraform apply` once a stable connection was confirmed — see the deploy log below). All 4 of the report's attack payloads re-run against the live app as Amy (RAM, logged in over real HTTP): blocked with zero leaked rows in every case — 2 by the new H1 scope-guard matching the territory/region name in the question text, 2 by the model itself declining (`NO_QUERY`) before SQL was ever generated. The authoritative DB-level RLS fix and the `sql_guard.py` regex layer were independently confirmed via the full local pytest suite's `test_c1_*` tests (both layers, 137/137 passing) before and after the live deploy. |
 | C2 | Default-period injection corrupts queries that already filter by `period_qtr`/`period_mo`/`transaction_date`/etc., or ask for explicit "all time" | **Done** | `sql_guard.py`'s `_PERIOD_PRESENT` now recognizes `mo_offset`/`wk_offset`/`period_qtr`/`period_mo`/`period_wk`/`transaction_date`/`week_ending_date` as "already scoped" (was `mo_offset`/`wk_offset` only). Added `strip_no_period_marker()` + `ensure_default_period(..., force_no_period=...)`: the SQL-generation prompt (`prompts.py` rule 8) now instructs the model to prepend a `-- NO_PERIOD` comment line when the user explicitly wants all-time/unscoped history; `main.py` strips it before validation and passes the signal through so the R3M backstop is skipped only then. Added 2 new few-shots (all-time with the marker; a named-year query using `period_mo`, not `mo_offset`). Tests: both of the report's repro cases (Q1-2026-vs-Q1-2025 not getting `mo_offset` jammed on top of `period_qtr`; "across all time" staying unfiltered) reproduced directly in `test_sql_guard.py` and asserted fixed, plus unit coverage for each period column and the marker round-trip. Committed locally. |
 | H3 | Market share rendered as "1.14%" instead of "114%" (decimal share not ×100'd) | **Done, verified against live Bedrock** | `ANSWER_SYSTEM_PROMPT` (`prompts.py`) now has an explicit rule: `market_share` is a decimal fraction, multiply by 100 before stating it (1.14 -> "114%", never "1.14%"), and state a >100% result plainly as a real property of the data rather than hiding/rounding it. `test_market_share_all_time_percentage_formatted_correctly` (`test_llm_nl_to_sql.py`) passed against real Bedrock once AWS credentials were restored. |
 | H4 | "Compare Q1 2026 vs Q1 2025" hallucinates a `period_yr` column and misuses `period_qtr` as `'Q1'` (real format `'2026-Q1'`) | **Done, verified against live Bedrock** | `prompts.py` rule 5 now states explicitly: no `period_yr` column exists, `period_qtr` format is `'<year>-Q<n>'`, `period_mo` is `'<year>-<month>'`. Added a worked Q1-2026-vs-Q1-2025 few-shot using conditional aggregation with the real format. `main.py` now catches `psycopg.errors.UndefinedColumn` before the generic catch-all and returns a distinct "referenced a data field that doesn't exist" message instead of "too complex or slow". `test_h4_invalid_column_error_gets_a_distinct_message_not_too_complex` (`test_answer_quality.py`) passed against real Bedrock once AWS credentials were restored. |
@@ -23,8 +23,8 @@ complete before/after.
 | M3 | Director revenue question gets a flat refusal, not offered the volume alternative RAM already gets | **Done** | Root cause: the model could legally respond `NO_QUERY` when told it lacked WAC access, producing a flat "I'm not able to answer that" refusal instead of attempting a volume query — nothing in the prompt actually forbade this. Added `DOMAIN_RULES` rule 13: a Director/RAM asking about revenue/dollars MUST get a substituted `pack_units` query, never a refusal/`NO_QUERY`, explicitly stated as identical for both roles. Also reinforced in both roles' `scope_line` text. |
 | M4 | Exec occasionally told "scoped to your region" (answer-side hallucination, data is full company) | **Done** | `ANSWER_SYSTEM_PROMPT`'s scope-note rule now states explicitly this has NO exceptions for an Exec, even if the question itself names a specific territory/region (mentioning a place isn't the same as being restricted to it) — only the backend's own note may introduce a scope caveat, never the model's own inference. |
 | L1 | `/docs` (FastAPI interactive API) publicly reachable on the live host | **Done** | `main.py` now gates `docs_url`/`redoc_url`/`openapi_url` on a new `APP_ENV` env var via `_docs_urls()` — all three disabled when `APP_ENV=production` (set in `infra/docker-compose.aws.yml`'s `backend` service), left on by default for local dev. Tests in `test_auth.py` cover both the pure helper and that `/docs` is actually reachable in this dev container. |
-| — | Value-assertion tests using the report's reference numbers (2,000,000 total rows; Exec all-time paid units 6,309,523; NYM R3M units 35,689; Director Northeast R3M units 68,236; Zenovax/Docetaxel share ~114%) | **Done** | Every reference number independently re-verified directly against the local full dataset via raw SQL before being hardcoded (all matched the report exactly, including the market-share one — report's "~114%" turned out to be the R3M value 1.1378, not all-time, confirmed by checking both). `tests/test_value_assertions.py` (6 tests, DB-only via `scoped_cursor`) all passing. `tests/qa_regression.py`'s 5 new live-chat test cases (TC30-TC34) still need a run against a live deployment (local in-process Bedrock tests don't exercise `qa_regression.py` itself, which is a standalone black-box HTTP script against a running server) — pending the redeploy below. |
-| — | Redeploy + re-run `qa_regression.py` against live + update `TESTS.md` | **Local verification done; live redeploy still pending** | Full local suite (`docker compose --profile test run tester`), now with real AWS credentials: **134/134 passed, 0 failed, 0 skipped** — every Bedrock-dependent test included. One test (`test_director_cannot_get_wac_via_rephrasing`) failed once mid-run, confirmed transient (3/3 passed in isolation both before and after a prompt hardening pass); see the network-blocker note above for the investigation and fix. `TESTS.md` regenerated from the clean 134/134 run and committed. Still pending: `terraform apply` + loader re-run to actually deploy any of this to EC2/RDS, then re-running `tests/qa_regression.py` against the live URL — **not done yet, per the user's explicit instruction this turn to commit locally only and not deploy/push.** |
+| — | Value-assertion tests using the report's reference numbers (2,000,000 total rows; Exec all-time paid units 6,309,523; NYM R3M units 35,689; Director Northeast R3M units 68,236; Zenovax/Docetaxel share ~114%) | **Done, verified live** | Every reference number independently re-verified directly against the local full dataset via raw SQL before being hardcoded (all matched the report exactly, including the market-share one — report's "~114%" turned out to be the R3M value 1.1378, not all-time, confirmed by checking both). `tests/test_value_assertions.py` (6 tests, DB-only via `scoped_cursor`) all passing. `tests/qa_regression.py`'s 5 live-chat test cases (TC30-TC34) all passed against the live deployed URL (see deploy log below) — confirmed the live site states "6,309,523" verbatim for the Exec all-time-units question. |
+| — | Redeploy + re-run `qa_regression.py` against live + update `TESTS.md` | **Done** | See the full deploy log below — `terraform apply`, a deploy-breaking bug found and fixed, redeploy, then `qa_regression.py --base-url http://34.206.93.198`: **40 passed, 0 failed, 0 warnings**. Full local suite re-run after: **137/137 passed, 0 failed, 0 skipped**. `TESTS.md` regenerated from that run and committed. |
 
 M1 (HTTP-only, no TLS) and L2/L3 (org_scope enumerable by any role; demo password
 committed in `qa_regression.py`) were explicitly out of scope for this remediation pass
@@ -75,6 +75,64 @@ Also fixed in passing (user asked to confirm it): `infra/variables.tf`'s
 `budget_alert_email` default was `chopradeepanshu@gmail.com` (wrong since this variable
 was first introduced — no `tfvars` override exists, so this default is what actually
 applies to the live AWS Budget alert). Corrected to `venkatalolla75@gmail.com`.
+
+## Live deploy log (git history rewritten to Venkata, redeploy, found+fixed a real
+## deploy-breaking bug, verified against the live site)
+
+1. User rewrote local git history (author -> Venkata &lt;venkatalolla75@gmail.com&gt;) and
+   force-pushed to a new remote (`github.com/venkatalolla75/nl2sql-pharma-assistant`).
+   `git fetch origin` + `git reset --hard origin/master`: local and origin were already
+   byte-identical (same tree hash) before the reset, confirming no work was lost — the
+   rewrite happened in the same working directory this session was already using, so
+   local `master` already reflected it. Verified `git log` shows Venkata as author on
+   every commit.
+2. `terraform plan` with `repo_url` pointed at the new GitHub remote: clean, scoped plan
+   (EC2 replacement to pick up new user-data/repo URL + the new `SCOPE_ROLE_PASSWORD`
+   secret, budget-email update, EIP reattach — no RDS/VPC/IAM changes). Applied
+   successfully; same `app_url` (EIP preserved across the replacement).
+3. First `qa_regression.py` run against the live URL: **9 passed, 31 failed.** Exec
+   questions got the generic "too complex or slow" message; Director/RAM got raw HTTP
+   500s. The JSON response's own `error` field gave the exact cause directly:
+   `KeyError: 'SCOPE_ROLE_PASSWORD'`.
+4. Root cause: `infra/docker-compose.aws.yml`'s `backend` service was missing
+   `SCOPE_ROLE_PASSWORD` in its environment block entirely — an earlier edit (adding it
+   while fixing C1, before the flight-mode interruption) matched a search string that
+   turned out to be unique to the `loader` service's block, so `backend`'s block was
+   silently never touched. This shipped undetected through every local test run because
+   local dev uses the separate (correctly-edited) `docker-compose.yml`. `app.db.
+   get_auth_connection` (login) uses `APP_DB_PASSWORD`, not `SCOPE_ROLE_PASSWORD`, which
+   is why login/profile checks kept working while every analytics query broke — a split
+   that looked like a database/RLS problem rather than a one-line env-var gap.
+5. Fixed, added `tests/test_infra_env_parity.py` (3 tests, compares required env vars
+   between the local and AWS compose files' `backend`/`loader` services so this exact
+   class of gap can't ship silently again), committed, and **pushed immediately** (this
+   fix had to reach `origin/master` before redeploying, since EC2's user-data clones
+   whatever's on that branch).
+6. Forced an EC2 replacement (`terraform apply -replace="aws_instance.app"`) to pick up
+   the fix — same scoped plan pattern as step 2. New instance booted, confirmed
+   `6,309,523` units back from a live `/chat` call as Exec (exact match to the report's
+   reference value).
+7. Re-ran `qa_regression.py` against the live URL: **40 passed, 0 failed, 0 warnings.**
+   Every accuracy/security/value-assertion/edge case test case passed, including the
+   H1 out-of-scope cases (TC09, TC14) and all 5 value-assertion cases (TC30-34).
+8. Re-ran the QA report's 4 literal C1 attack payloads against the live app logged in as
+   Amy (RAM) over real HTTP. The live interface is NL-only (no raw-SQL endpoint), so each
+   payload was submitted as a prompt-injection-style message asking the model to run the
+   exact attack SQL verbatim. All 4 were blocked with zero rows leaked: 2 (the ones
+   naming "Texas"/"West" literally in the message text) by the new H1 scope-guard, which
+   matches real territory/region names in the question text before Bedrock is even
+   called; the other 2 (no place name in the NL text, just the raw SQL) were declined by
+   the model itself (`NO_QUERY: out of scope`) before reaching SQL generation. Both
+   outcomes are valid independent layers; the authoritative guarantee (DB-level RLS
+   keyed on `session_user` + `sql_guard.py`'s regex blocklist) was already proven
+   unconditionally by the full local pytest suite's `test_c1_*` tests (`test_db_security.
+   py` + `test_sql_guard.py`), which run the exact same 4 payloads directly against
+   `scoped_cursor`/`validate_and_finalize` with no LLM involved — SSM access to inspect
+   the live RDS connection directly wasn't available (agent never registered on either
+   EC2 instance this session; `aws ssm describe-instance-information` stayed empty), so
+   this is the closest faithful "live app" reproduction achievable over HTTP alone.
+9. Final full local suite re-run: **137/137 passed, 0 failed, 0 skipped.** `TESTS.md`
+   regenerated from this run.
 
 ## Phased Task List
 

@@ -249,14 +249,16 @@ it's a backstop against any future regression in the RLS design — the DB fix i
 actual guarantee, the guard is insurance.
 
 **Deployment status, as of this writing.** This fix (and the rest of the QA_REPORT.txt
-remediation — see `PLAN.md`) is implemented, tested, and committed locally, but **not
-yet deployed** — the live EC2/RDS instance was still running the old GUC-based RLS
-policies at the time this section was written. Rolling it out needs a `terraform apply`
-(for the new `SCOPE_ROLE_PASSWORD` secret) plus a loader re-run against RDS to provision
-the per-scope roles; both were deliberately held back mid-session at the user's explicit
-instruction (unreliable network — no destructive/remote operations until they confirmed a
-stable connection). Treat the live site as still vulnerable to this finding until
-`PLAN.md`'s remediation table shows the redeploy step done.
+remediation — see `PLAN.md`) is implemented, tested, **deployed to the live EC2/RDS
+instance, and verified there**: the QA report's 4 literal attack payloads were re-run
+against the live app logged in as a RAM over real HTTP and all were blocked with zero
+rows leaked (see `PLAN.md`'s live deploy log for the exact mechanism each was caught by).
+The deploy itself surfaced one real bug along the way — `infra/docker-compose.aws.yml`'s
+`backend` service was initially missing the new `SCOPE_ROLE_PASSWORD` secret entirely,
+breaking every analytics query on first redeploy — found via the live site's own error
+response, fixed, and re-verified; see `PLAN.md` for the full writeup and
+`tests/test_infra_env_parity.py` for the regression test added to catch that class of
+gap in the future.
 
 ## AWS services used
 

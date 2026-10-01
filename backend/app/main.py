@@ -241,6 +241,25 @@ def chat(body: ChatRequest, request: Request):
              "columns": [], "rows": [], "row_count": 0, "error": str(exc)},
             status_code=200,
         )
+    except psycopg.errors.UndefinedColumn as exc:
+        # QA report H4: a hallucinated column (e.g. a non-existent period_yr) was being
+        # reported with the same "too complex or slow" message as a genuine statement
+        # timeout — misleading, since the query failed instantly on a bad column
+        # reference, not because it was too big. Distinct message so the user (and
+        # anyone debugging) can tell the two apart.
+        friendly = (
+            "I wasn't able to run that query — it referenced a data field that doesn't "
+            "exist in this schema. Try rephrasing your question; if it names a specific "
+            "quarter or year, use a format like 'Q1 2026' or '2026'."
+        )
+        history.append({"role": "user", "content": question})
+        history.append({"role": "assistant", "content": final_sql})
+        del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
+        return JSONResponse(
+            {"answer": friendly, "sql": final_sql if body.show_sql else None,
+             "columns": [], "rows": [], "row_count": 0, "error": str(exc)},
+            status_code=200,
+        )
     except Exception as exc:
         friendly = (
             "I wasn't able to run that query — it may have been too complex or slow "

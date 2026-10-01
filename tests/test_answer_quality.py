@@ -178,6 +178,48 @@ def test_error_message_blames_access_level_only_when_db_actually_denies(
     assert ok, body
 
 
+def test_h4_invalid_column_error_gets_a_distinct_message_not_too_complex(
+    login, users, monkeypatch, report
+):
+    """H4 (QA report): a hallucinated column (e.g. a non-existent period_yr) must not get
+    the same "too complex or slow" message as a genuine statement timeout — that's
+    actively misleading, since the query failed instantly on a bad reference, not because
+    it was too big."""
+    if LIVE_URL:
+        pytest.skip("monkeypatches app.main.scoped_cursor in this process - only "
+                    "affects the in-process app, not a remote deployed server")
+    import app.main as main_module
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _raise_undefined_column(*_a, **_k):
+        raise psycopg.errors.UndefinedColumn('column "period_yr" does not exist')
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main_module, "scoped_cursor", _raise_undefined_column)
+
+    c = login(users["exec"])
+    resp = c.post("/chat", json={"message": "Compare Q1 2026 vs Q1 2025.",
+                                  "show_sql": True})
+    body = resp.json()
+    answer_lower = body.get("answer", "").lower()
+    ok = (
+        resp.status_code == 200
+        and "too complex or slow" not in answer_lower
+        and "access level" not in answer_lower
+        and ("doesn't exist" in answer_lower or "does not exist" in answer_lower
+             or "field" in answer_lower or "column" in answer_lower)
+    )
+    report.record(
+        "Security (live chat)", "Invalid-column DB error gets a distinct message", ok,
+        question="(monkeypatched scoped_cursor to raise UndefinedColumn)",
+        expected="answer names a missing/invalid field, not 'too complex or slow'",
+        actual=body.get("answer"),
+    )
+    assert ok, body
+
+
 # ---------------------------------------------------------------------------
 # Issue 2 — scope wording must match the actual role, never hallucinated
 # ---------------------------------------------------------------------------

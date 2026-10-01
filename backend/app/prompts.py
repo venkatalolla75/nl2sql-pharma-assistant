@@ -78,6 +78,12 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
    on the period label columns (e.g. `period_qtr IN (SELECT DISTINCT period_qtr FROM
    sales WHERE mo_offset ...)`); that's both an unnecessary extra step and far slower on
    a table this size than filtering the offset column itself.
+   There is NO period_yr column — it does not exist in this schema, do not invent it.
+   period_qtr's format is exactly '<year>-Q<n>' (e.g. '2026-Q1', '2025-Q4') — always
+   include the year; a bare 'Q1' matches every year at once and can't express a specific
+   quarter. period_mo's format is '<year>-<month>' (e.g. '2026-03'). Use these exact
+   formats whenever a question names a specific quarter, month, or year-over-year
+   comparison, and see the worked example below.
 
 6. PRODUCTS: brand_flag=1 on products/sales = one of NovaPharma's 7 branded products
    (Zenovax, Carbotrel, Gemtara, Paxelium, Oncosetron, Cyclonova, Luprex Depot).
@@ -221,6 +227,17 @@ SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 
 -- NOT also add mo_offset IN (0,1,2) on top of it (mo_offset and period_mo are different,
 -- unrelated numbering schemes; combining them produces an empty result). No NO_PERIOD
 -- marker needed either - a named period isn't "all time".
+
+Q: Compare total Zenovax pack units in Q1 2026 vs Q1 2025
+SQL: SELECT SUM(CASE WHEN s.period_qtr = '2026-Q1' THEN s.pack_units END) AS q1_2026_units, SUM(CASE WHEN s.period_qtr = '2025-Q1' THEN s.pack_units END) AS q1_2025_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.drug_name = 'ZENOVAX' AND s.period_qtr IN ('2026-Q1', '2025-Q1')
+-- NOTE: there is NO period_yr column anywhere in this schema - do not invent one. The
+-- real format of period_qtr is '<year>-Q<n>' (e.g. '2026-Q1'), never a bare 'Q1' - a bare
+-- quarter number alone can't tell two different years apart. A year-over-year or
+-- quarter-over-quarter comparison needs the EXACT YEAR in period_qtr for each side, named
+-- or inferred from context (e.g. "this quarter vs the same quarter last year" - work out
+-- the current year/quarter from the most recent period_qtr in the data if you don't
+-- already know it, rather than guessing). Both quarters named -> this is already a fully
+-- scoped period comparison; do not add mo_offset/wk_offset on top of it (rule 8).
 """
 
 FEWSHOT_NON_EXEC = """

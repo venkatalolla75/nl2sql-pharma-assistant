@@ -25,6 +25,9 @@ tfplan
 !sample*.csv
 schema/generated/
 
+# qa_regression.py's own timestamped report output (regenerated every run)
+qa_reports/
+
 # Python
 __pycache__/
 *.pyc

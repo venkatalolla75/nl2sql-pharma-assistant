@@ -33,6 +33,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-pharma}
       APP_DB_USER: app_login
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      SCOPE_ROLE_PASSWORD: ${SCOPE_ROLE_PASSWORD}
       SESSION_SECRET: ${SESSION_SECRET}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-amazon.nova-pro-v1:0}

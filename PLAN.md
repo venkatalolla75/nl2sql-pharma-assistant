@@ -3,7 +3,7 @@
 Living plan for the take-home assignment (source: https://github.com/cveeraiy/nl2sql-assignment).
 Updated as phases complete. See end of file for a running blocker log.
 
-## QA_REPORT.txt remediation — status (in progress)
+## QA_REPORT.txt remediation — status (all code fixes done; live redeploy/verification pending)
 
 An external QA review (`QA_REPORT.txt`) found 2 critical, 4 high, and several medium/low
 issues against the full 2M-row dataset. Working through them in the report's suggested
@@ -24,7 +24,7 @@ complete before/after.
 | M4 | Exec occasionally told "scoped to your region" (answer-side hallucination, data is full company) | **Done** | `ANSWER_SYSTEM_PROMPT`'s scope-note rule now states explicitly this has NO exceptions for an Exec, even if the question itself names a specific territory/region (mentioning a place isn't the same as being restricted to it) — only the backend's own note may introduce a scope caveat, never the model's own inference. |
 | L1 | `/docs` (FastAPI interactive API) publicly reachable on the live host | **Done** | `main.py` now gates `docs_url`/`redoc_url`/`openapi_url` on a new `APP_ENV` env var via `_docs_urls()` — all three disabled when `APP_ENV=production` (set in `infra/docker-compose.aws.yml`'s `backend` service), left on by default for local dev. Tests in `test_auth.py` cover both the pure helper and that `/docs` is actually reachable in this dev container. |
 | — | Value-assertion tests using the report's reference numbers (2,000,000 total rows; Exec all-time paid units 6,309,523; NYM R3M units 35,689; Director Northeast R3M units 68,236; Zenovax/Docetaxel share ~114%) | **Done** | Every reference number independently re-verified directly against the local full dataset via raw SQL before being hardcoded (all matched the report exactly, including the market-share one — report's "~114%" turned out to be the R3M value 1.1378, not all-time, confirmed by checking both). New `tests/test_value_assertions.py` (6 tests, DB-only via `scoped_cursor`, no Bedrock needed — all passing now): total rows, Exec all-time units+WAC, NYM RAM R3M units+transactions, NYM all-time visible rows, Director Northeast R3M units, Zenovax/Docetaxel R3M market share. `tests/qa_regression.py` got 5 new live-chat test cases (TC30-TC34) plus two new check helpers (`approx_value`, `answer_percentage_approx`) asserting the same numbers come back through the real `/chat` endpoint — not yet run (needs live Bedrock + a running deployment; see network blocker). |
-| — | Redeploy + re-run `qa_regression.py` against live + update `TESTS.md` | Pending | Final step once all fixes above land. |
+| — | Redeploy + re-run `qa_regression.py` against live + update `TESTS.md` | **Partially done** | Full local suite re-run after every fix above: **98 passed, 0 failed, 36 skipped** (all 36 skips are Bedrock-dependent tests, blocked by the AWS SSO credential/network blocker above — not failures). `TESTS.md` regenerated and committed reflecting this. Still pending (blocked on the user confirming a stable connection, per the flight-mode instruction): `terraform apply` to push the C1 DB-role changes + all code/prompt fixes to the live EC2/RDS deployment, then re-running `tests/qa_regression.py` against the live URL and folding those results into `TESTS.md` too. |
 
 M1 (HTTP-only, no TLS) and L2/L3 (org_scope enumerable by any role; demo password
 committed in `qa_regression.py`) were explicitly out of scope for this remediation pass

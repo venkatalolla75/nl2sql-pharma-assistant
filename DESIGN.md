@@ -248,6 +248,16 @@ application-layer guard rejects these payloads *before* they reach the database 
 it's a backstop against any future regression in the RLS design — the DB fix is the
 actual guarantee, the guard is insurance.
 
+**Deployment status, as of this writing.** This fix (and the rest of the QA_REPORT.txt
+remediation — see `PLAN.md`) is implemented, tested, and committed locally, but **not
+yet deployed** — the live EC2/RDS instance was still running the old GUC-based RLS
+policies at the time this section was written. Rolling it out needs a `terraform apply`
+(for the new `SCOPE_ROLE_PASSWORD` secret) plus a loader re-run against RDS to provision
+the per-scope roles; both were deliberately held back mid-session at the user's explicit
+instruction (unreliable network — no destructive/remote operations until they confirmed a
+stable connection). Treat the live site as still vulnerable to this finding until
+`PLAN.md`'s remediation table shows the redeploy step done.
+
 ## AWS services used
 
 | Service | Why |

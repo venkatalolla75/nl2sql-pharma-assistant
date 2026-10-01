@@ -78,6 +78,35 @@ _WK_PATTERNS: list[tuple[re.Pattern, list[int], str]] = [
     (re.compile(r"\bwk_offset\s*<=\s*3\b"), [0, 1, 2, 3], "the last 4 weeks (R30D)"),
 ]
 
+# QA report (H2): "this year"/YTD was defined as mo_offset BETWEEN 0 AND 11 (a trailing
+# 12-month window), then the answer step called it "January to November" regardless of
+# what months were actually in the data (data ends Sep 2026) - neither the filter nor the
+# label was actually year-to-date. prompts.py rule 5 now has the model emit this exact
+# period_mo subquery shape for "this year"/YTD instead; matching it here lets the answer
+# state the REAL calendar year and REAL month range from the data, never a guessed one.
+_YTD_PATTERN = re.compile(
+    r"period_mo\s*>=\s*\(\s*select\s+left\s*\(\s*period_mo\s*,\s*4\s*\)\s*\|\|\s*'-01'"
+    r"\s+from\s+sales\s+where\s+mo_offset\s*=\s*0",
+    re.IGNORECASE,
+)
+
+
+def _ytd_label() -> str | None:
+    labels = _mo_labels()
+    current = labels.get(0)
+    if not current:
+        return None
+    year = current.split("-")[0]
+    months = sorted({m for m in labels.values() if m.startswith(f"{year}-")})
+    if not months:
+        return None
+    start, _ = _month_bounds(months[0])
+    _, end = _month_bounds(months[-1])
+    span = f"{_fmt(start)} - {_fmt(end)}"
+    if len(months) == 1:
+        return f"year to date ({year}): {months[0]} ({span})"
+    return f"year to date ({year}): {months[0]} to {months[-1]} ({span})"
+
 
 def period_note(sql: str) -> str | None:
     """Best-effort, data-grounded period description for the query that just ran, to
@@ -85,6 +114,11 @@ def period_note(sql: str) -> str | None:
     it. Returns None if no recognized offset filter is present — not every question is
     period-bound (e.g. "list our branded products"), and we'd rather say nothing than
     guess."""
+    if _YTD_PATTERN.search(sql):
+        label = _ytd_label()
+        if label:
+            return f"the period covered is {label}"
+
     for pattern, offsets, label in _MO_PATTERNS:
         if pattern.search(sql):
             range_label = _mo_range_label(offsets)

@@ -70,8 +70,14 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
 
 5. TIME: prefer wk_offset/mo_offset over date arithmetic. 0 = current period.
    R3M (last 3 months) = mo_offset IN (0,1,2). R6M/prior-3-months = mo_offset IN (3,4,5).
-   Last quarter = mo_offset IN (1,2,3). "This year"/"year to date"/"so far this year" =
-   mo_offset BETWEEN 0 AND 11 (trailing 12 months — there's no calendar-year column).
+   Last quarter = mo_offset IN (1,2,3).
+   "This year" / "year to date" / "YTD" / "so far this year" = the CURRENT CALENDAR YEAR,
+   January through the most recent available month — this is NOT the same as a trailing
+   12-month window. Filter with exactly this subquery shape (it derives the current year
+   from the most recent period in the data, so it never needs a hardcoded year):
+   period_mo >= (SELECT LEFT(period_mo, 4) || '-01' FROM sales WHERE mo_offset = 0 LIMIT 1)
+   Do not substitute mo_offset BETWEEN 0 AND 11 for this — that is a trailing 12-month
+   window, a different thing from year-to-date, and will usually span two calendar years.
    "Last year" = mo_offset BETWEEN 12 AND 23. Use period_wk/period_mo/period_qtr for
    GROUP BY trend labels, not raw dates. Always filter by comparing wk_offset/mo_offset
    directly (=, IN, BETWEEN) — never derive a period filter indirectly through a subquery
@@ -220,6 +226,12 @@ SELECT COUNT(*) AS total_transactions FROM sales WHERE s.data_source = 'distribu
 -- `-- NO_PERIOD` marker line and do NOT add mo_offset/wk_offset yourself. Omitting the
 -- marker here would make the backend inject R3M anyway, silently turning "all time" into
 -- "the last 3 months".
+
+Q: What's our volume so far this year (YTD)?
+SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.period_mo >= (SELECT LEFT(period_mo, 4) || '-01' FROM sales WHERE mo_offset = 0 LIMIT 1)
+-- NOTE: year-to-date is the current calendar year through the latest available month
+-- (rule 5), not a trailing 12-month window - use this exact period_mo subquery shape,
+-- never mo_offset BETWEEN 0 AND 11 for "this year"/"YTD".
 
 Q: What was total Zenovax volume in 2025?
 SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.drug_name = 'ZENOVAX' AND s.period_mo LIKE '2025-%'

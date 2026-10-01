@@ -23,7 +23,21 @@ from app.sql_guard import (
     validate_and_finalize,
 )
 
-app = FastAPI(title="NovaPharma NL-to-SQL Assistant")
+# L1 (QA report, low): the interactive API docs (/docs, /redoc) and raw OpenAPI schema
+# were reachable on the live host — harmless here, but unnecessary public surface for a
+# production deployment. Disabled whenever APP_ENV=production (set in
+# infra/docker-compose.aws.yml); left on by default for local dev, where they're useful.
+def _docs_urls(app_env: str) -> tuple[str | None, str | None, str | None]:
+    if app_env == "production":
+        return None, None, None
+    return "/docs", "/redoc", "/openapi.json"
+
+
+_docs_url, _redoc_url, _openapi_url = _docs_urls(os.environ.get("APP_ENV", "development"))
+app = FastAPI(
+    title="NovaPharma NL-to-SQL Assistant",
+    docs_url=_docs_url, redoc_url=_redoc_url, openapi_url=_openapi_url,
+)
 
 SESSION_SECRET = os.environ.get("SESSION_SECRET") or secrets.token_hex(32)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")

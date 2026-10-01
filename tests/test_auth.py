@@ -1,5 +1,7 @@
 """Login/session tests — app-level auth, no LLM involved."""
 
+from app.main import _docs_urls
+
 
 def test_me_requires_auth(client):
     r = client.get("/me")
@@ -43,6 +45,26 @@ def test_login_success_exposes_correct_role_and_scope(login, users):
     assert me["role"] == "ram"
     assert me["territory_name"] == "New York Metro"
     assert me["can_view_wac"] is False
+
+
+# ---------------------------------------------------------------------------
+# L1 (QA report, low): /docs and /redoc must be disabled when APP_ENV=production, but
+# left on for local dev (where this test container itself runs, confirming the default).
+# ---------------------------------------------------------------------------
+
+def test_docs_urls_disabled_in_production():
+    assert _docs_urls("production") == (None, None, None)
+
+
+def test_docs_urls_enabled_by_default():
+    assert _docs_urls("development") == ("/docs", "/redoc", "/openapi.json")
+
+
+def test_docs_reachable_in_this_dev_container(client):
+    """This test container runs without APP_ENV=production (see docker-compose.yml) -
+    confirms /docs stays on for local dev, matching _docs_urls' default."""
+    r = client.get("/docs")
+    assert r.status_code == 200
 
 
 def test_logout_clears_session(login, users):

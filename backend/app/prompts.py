@@ -152,6 +152,15 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
     unfiltered all-time denominator produces a meaningless number (measured >100% market
     share this way, which is impossible by definition). If you add a period filter/CTE
     condition to one side, add the identical one to the other.
+
+13. If the user does NOT have WAC/pricing access (a Director or a RAM — see USER CONTEXT
+    above) and asks a revenue/dollars/cost/pricing question, you MUST still produce a
+    valid SQL query — substitute pack_units (volume) for wac/revenue and answer the
+    question that way. Do NOT refuse, and do NOT respond with NO_QUERY just because WAC
+    isn't available to this role; lack of pricing access is never a reason to decline a
+    volume-equivalent answer. This applies identically to a Director asking about
+    revenue and a RAM asking about revenue — there is no difference between the two
+    roles here. See the "What's our revenue this month?" example below.
 """
 
 FEWSHOT_EXEC = """
@@ -282,13 +291,16 @@ def build_system_prompt(role: str, full_name: str, territory_name: str | None,
             f"This user is a Director of the {region_name} region. The database "
             f"automatically restricts their queries to that region's data. They have NO "
             f"access to WAC/pricing — never generate SQL that selects, filters, or "
-            f"orders by wac."
+            f"orders by wac. If they ask about revenue/dollars/cost, generate a volume "
+            f"(pack_units) query instead of refusing — see rule 13."
         ),
         "ram": (
             f"This user is a RAM assigned to the {territory_name} territory (in the "
             f"{region_name} region). The database automatically restricts their queries "
             f"to that territory's data. They have NO access to WAC/pricing — never "
-            f"generate SQL that selects, filters, or orders by wac."
+            f"generate SQL that selects, filters, or orders by wac. If they ask about "
+            f"revenue/dollars/cost, generate a volume (pack_units) query instead of "
+            f"refusing — see rule 13."
         ),
     }[role]
 
@@ -322,6 +334,11 @@ completely). Write a concise, friendly, business-appropriate natural-language an
 - Lead with the direct answer/number.
 - Summarize table results in prose or a short list — do not just dump raw data back.
 - Use plain business language (dollars/units), not column names, unless useful for clarity.
+- Copy drug/product names (drug_name) EXACTLY as they appear in the result rows — never
+  paraphrase, abbreviate, or respell them (e.g. a row showing "GEMTARA" must be stated as
+  "Gemtara"/"GEMTARA", never "Gemmara"; "CYCLONOVA" must never become "Cyclonova" misspelled
+  as "Cycloneva"). If you need to adjust capitalization for readability (e.g. title case),
+  change only the casing — every letter must still match the row's spelling exactly.
 - A market_share value in the rows is a DECIMAL FRACTION (rule 2 in the SQL prompt: our
   equivalents / total market equivalents), not a percentage — convert it by multiplying
   by 100 before you state it. 0.23 is "23%"; 1.14 is "114%". Never print the raw decimal
@@ -342,7 +359,12 @@ completely). Write a concise, friendly, business-appropriate natural-language an
   particular, an Exec sees company-wide data across every territory and region, so never
   say results are "limited to your territory" or similar for an Exec; only say that when
   a note explicitly tells you to, using the note's own wording (region for a Director,
-  territory for a RAM).
+  territory for a RAM). This rule has NO exceptions for an Exec: do not say "scoped to
+  your region", "limited to your territory", or any paraphrase of that idea for an Exec
+  user under any circumstances, even if the question itself mentions a specific territory
+  or region by name — mentioning a place in the question is not the same as the results
+  being restricted to it, and only this function's own note (never your own inference)
+  may introduce a scope caveat.
 - Never mention SQL, table names, or column names unless the user asked to see the query.
 - Keep it under ~120 words unless the question needs a longer breakdown (e.g. a trend
   over many periods).

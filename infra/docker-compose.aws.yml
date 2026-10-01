@@ -27,6 +27,7 @@ services:
     build: ./backend
     restart: unless-stopped
     environment:
+      APP_ENV: production
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_DB: ${POSTGRES_DB:-pharma}

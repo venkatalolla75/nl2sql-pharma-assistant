@@ -8,6 +8,8 @@ and the two are compared. This tests actual model behavior, not a mocked one.
 Requires AWS credentials with Bedrock access (skipped otherwise — see conftest.py).
 """
 
+import re
+
 import pytest
 
 from app.db import scoped_cursor
@@ -126,6 +128,60 @@ def test_market_share_uses_distributor_over_market_data(login, users, report):
               "matched on market_subcategory='Docetaxel'.",
     )
     assert ok, f"expected ~{expected:.4f}, got {actual} (SQL: {body.get('sql')})"
+
+
+def test_market_share_all_time_percentage_formatted_correctly(login, users, report):
+    """H3 (QA report): market_share is a decimal fraction (e.g. 1.14), and the NL answer
+    must state it as a percentage by multiplying by 100 (~114%) - not print the raw
+    decimal with a '%' sign appended (the app's prior answer, '1.14%', understates the
+    true value a hundredfold). Also exercises C2's NO_PERIOD path end-to-end: "all time"
+    must not silently get R3M applied."""
+    question = "What is our market share for Zenovax in the Docetaxel market, all time?"
+    with scoped_cursor("exec", None, None) as cur:
+        cur.execute(
+            """
+            SELECT
+              (SELECT SUM(s.pack_units * p.unit_conversion_factor)
+               FROM sales s JOIN products p ON s.ndc = p.ndc
+               WHERE s.data_source='distributor' AND s.brand_flag=1
+                 AND p.market_subcategory='Docetaxel')
+              /
+              NULLIF((SELECT SUM(s.pack_units * p.unit_conversion_factor)
+               FROM sales s JOIN products p ON s.ndc = p.ndc
+               WHERE s.data_source='market_data'
+                 AND p.market_subcategory='Docetaxel'), 0)
+            """
+        )
+        expected = float(cur.fetchone()[0])
+
+    c = login(users["exec"])
+    resp = c.post("/chat", json={"message": question, "show_sql": True})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    actual = _first_number(body["rows"])
+    sql_ok = _close(actual, expected, rel_tol=0.15)
+
+    expected_pct = expected * 100
+    percentages = [
+        float(m) for m in re.findall(r"(\d+(?:\.\d+)?)\s*%", body.get("answer", ""))
+    ]
+    pct_ok = any(_close(p, expected_pct, rel_tol=0.15) for p in percentages)
+
+    ok = sql_ok and pct_ok
+    report.record(
+        "NL-to-SQL Accuracy",
+        "H3: market share stated as correct percentage (all time)", ok,
+        question=question, sql=body.get("sql"),
+        expected=f"{expected:.4f} ({expected_pct:.1f}%)",
+        actual=f"rows={actual}, answer={body.get('answer')!r}",
+        notes="QA report H3: the answer text must multiply the decimal by 100, not "
+              "print it raw with a '%' sign.",
+    )
+    assert sql_ok, f"SQL result wrong: expected ~{expected:.4f}, got {actual} (SQL: {body.get('sql')})"
+    assert pct_ok, (
+        f"answer never stated ~{expected_pct:.1f}% (percentages found in answer: "
+        f"{percentages}) — answer: {body.get('answer')!r}"
+    )
 
 
 def test_top_accounts_grandparent_rollup(login, users, report):

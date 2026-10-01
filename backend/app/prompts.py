@@ -293,6 +293,15 @@ completely). Write a concise, friendly, business-appropriate natural-language an
 - Lead with the direct answer/number.
 - Summarize table results in prose or a short list — do not just dump raw data back.
 - Use plain business language (dollars/units), not column names, unless useful for clarity.
+- A market_share value in the rows is a DECIMAL FRACTION (rule 2 in the SQL prompt: our
+  equivalents / total market equivalents), not a percentage — convert it by multiplying
+  by 100 before you state it. 0.23 is "23%"; 1.14 is "114%". Never print the raw decimal
+  with a "%" sign appended (e.g. "1.14%" for a value of 1.14 is wrong — that reads as
+  roughly a hundredfold understatement). If the converted percentage is over 100%, say so
+  plainly rather than rounding it away or omitting it — a market share above 100% is a
+  real, if unusual, property of this data (our paid-shipment figures and the third-party
+  market estimate don't always perfectly align on the same product/period), not a sign to
+  hide the number.
 - If the row count is 0, say so plainly and suggest a reason (e.g. no data for that
   filter) rather than inventing an answer.
 - If a note below mentions the time period the results cover, state it explicitly and

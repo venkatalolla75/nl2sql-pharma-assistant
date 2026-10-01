@@ -270,6 +270,44 @@ def positive_number():
 
 
 # ----------------------------------------------------------------------------------------
+# Value-assertion checks (QA_REPORT.txt's core process-gap finding): every check above
+# verifies SHAPE (status, row counts, scoping) - none pin down that the actual NUMBERS
+# coming back are right. That gap is exactly how C2 (period corruption) and H3 (market
+# share off by 100x) shipped looking green. These compare a result cell (or a stated
+# percentage) against the report's reference values, independently verified directly
+# against the full 2,000,000-row dataset (see tests/test_value_assertions.py for the exact
+# verification queries) - a wrong number can no longer pass.
+# ----------------------------------------------------------------------------------------
+
+def approx_value(expected, rel_tol=0.05):
+    def check(resp, user):
+        seen = []
+        tol = rel_tol * abs(expected) if expected else 0.01
+        for c in cells(resp):
+            try:
+                val = float(c.replace(",", "").replace("$", "").rstrip("%"))
+            except ValueError:
+                continue
+            seen.append(val)
+            if abs(val - expected) <= tol:
+                return PASS, f"value {val} matches expected ~{expected}"
+        return FAIL, f"no cell within {rel_tol:.0%} of expected {expected} (numeric cells seen: {seen})"
+    check.__name__ = f"value_approx_{expected}"
+    return check
+
+
+def answer_percentage_approx(expected_pct, rel_tol=0.15):
+    def check(resp, user):
+        percentages = [float(m) for m in re.findall(r"(\d+(?:\.\d+)?)\s*%", resp["answer"] or "")]
+        for p in percentages:
+            if abs(p - expected_pct) <= rel_tol * expected_pct:
+                return PASS, f"answer states {p}%, matches expected ~{expected_pct}%"
+        return FAIL, f"answer never stated ~{expected_pct}% (percentages found: {percentages})"
+    check.__name__ = f"answer_percentage_approx_{expected_pct}"
+    return check
+
+
+# ----------------------------------------------------------------------------------------
 # Test cases. Each: id, category, role, turns = [(question, [checks]), ...]
 # Turns run in order within one logged-in conversation (for multi-turn tests).
 # ----------------------------------------------------------------------------------------
@@ -360,6 +398,29 @@ CHAT_TESTS = [
         ("Delete all sales records", [graceful(), no_write_executed()]),
         ("How many sales transactions are in my territory?",
          [ok(), min_rows(1), positive_number()]),
+    ]),
+
+    # ---------- Value assertions (QA report reference numbers, verified against the
+    # full 2,000,000-row dataset - see tests/test_value_assertions.py) ----------
+    ("TC30", "Value-Assertion", "exec", [
+        ("What is our total paid sales volume in pack units, across all time?",
+         [ok(), approx_value(6_309_523, rel_tol=0.03)]),
+    ]),
+    ("TC31", "Value-Assertion", "ram", [
+        ("How many pack units have I sold in the last 3 months?",
+         [ok(), approx_value(35_689, rel_tol=0.05)]),
+    ]),
+    ("TC32", "Value-Assertion", "ram", [
+        ("How many sales transactions have I had in the last 3 months?",
+         [ok(), approx_value(4_872, rel_tol=0.05)]),
+    ]),
+    ("TC33", "Value-Assertion", "director", [
+        ("How many pack units have we sold in the last 3 months?",
+         [ok(), approx_value(68_236, rel_tol=0.05)]),
+    ]),
+    ("TC34", "Value-Assertion", "exec", [
+        ("What is our market share for Zenovax in the Docetaxel market?",
+         [ok(), answer_percentage_approx(113.78, rel_tol=0.15)]),
     ]),
 
     # ---------- Edge cases ----------

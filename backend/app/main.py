@@ -15,7 +15,12 @@ from app import bedrock
 from app.auth import authenticate, get_user_by_id
 from app.db import scoped_cursor
 from app.periods import period_note as _period_note
-from app.sql_guard import SqlValidationError, ensure_default_period, validate_and_finalize
+from app.sql_guard import (
+    SqlValidationError,
+    ensure_default_period,
+    strip_no_period_marker,
+    validate_and_finalize,
+)
 
 app = FastAPI(title="NovaPharma NL-to-SQL Assistant")
 
@@ -186,15 +191,23 @@ def chat(body: ChatRequest, request: Request):
         return {"answer": answer, "sql": None, "columns": [], "rows": [], "row_count": 0}
 
     try:
-        final_sql = validate_and_finalize(raw_sql, user["role"])
+        # The model prepends a `-- NO_PERIOD` marker line when the user explicitly asked
+        # for all-time/unscoped history (prompts.py rule 8) — strip it before validation
+        # so it never reaches the database, and remember the signal for the backstop
+        # below (see sql_guard.strip_no_period_marker's docstring for why this has to
+        # come from the model rather than a post-hoc regex guess).
+        sql_to_validate, force_no_period = strip_no_period_marker(raw_sql)
+        final_sql = validate_and_finalize(sql_to_validate, user["role"])
         # Backend backstop, not just a prompt instruction: the model is told to default
         # unscoped questions to R3M, but has been observed simply not doing it (e.g.
         # "top accounts by volume" with no period named), scanning all 2M/3 years of
         # sales and hitting the statement timeout. If the validated SQL touches `sales`
-        # but never filters by an offset column, enforce the default here. _period_note
-        # (below) picks up the injected filter automatically and tells generate_answer
-        # to state the period, same as an LLM-written one would.
-        final_sql, _ = ensure_default_period(final_sql)
+        # but never filters by any period column (mo_offset/wk_offset/period_qtr/
+        # period_mo/period_wk/transaction_date/week_ending_date), enforce the default
+        # here — unless the model's own NO_PERIOD marker said this is intentional.
+        # _period_note (below) picks up the injected filter automatically and tells
+        # generate_answer to state the period, same as an LLM-written one would.
+        final_sql, _ = ensure_default_period(final_sql, force_no_period=force_no_period)
     except SqlValidationError as exc:
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": raw_sql})

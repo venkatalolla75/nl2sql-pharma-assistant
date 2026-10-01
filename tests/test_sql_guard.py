@@ -11,6 +11,7 @@ from app.sql_guard import (
     MAX_ROW_LIMIT,
     SqlValidationError,
     ensure_default_period,
+    strip_no_period_marker,
     validate_and_finalize,
 )
 
@@ -236,6 +237,106 @@ def test_set_and_reset_keywords_rejected():
         validate_and_finalize("SELECT 1 FROM sales WHERE 1=1 AND set = 1", "ram")
     with pytest.raises(SqlValidationError):
         validate_and_finalize("SELECT 1 FROM sales WHERE 1=1 AND reset = 1", "ram")
+
+
+# ---------------------------------------------------------------------------
+# C2 (QA report, high): the old "already scoped" check only recognized mo_offset/
+# wk_offset, so a query that named a period another way (period_qtr/period_mo/
+# transaction_date/week_ending_date) or asked for explicit "all time" got R3M jammed on
+# top anyway - producing empty results ("Q1 2026 vs Q1 2025" -> no rows in the last 3
+# months) or self-contradictory ones ("153,842 ... across all time for the last 3
+# months", true total 2,000,000). Reference repro cases taken directly from the report.
+# ---------------------------------------------------------------------------
+
+def test_default_period_not_injected_when_period_qtr_already_present():
+    original = (
+        "SELECT SUM(s.pack_units) FROM sales s WHERE s.period_qtr = '2026-Q1'"
+    )
+    sql, defaulted = ensure_default_period(original)
+    assert defaulted is False
+    assert sql == original
+
+
+def test_default_period_not_injected_when_period_mo_already_present():
+    original = "SELECT SUM(pack_units) FROM sales WHERE period_mo LIKE '2025-%'"
+    sql, defaulted = ensure_default_period(original)
+    assert defaulted is False
+    assert sql == original
+
+
+def test_default_period_not_injected_when_transaction_date_already_present():
+    original = (
+        "SELECT SUM(pack_units) FROM sales WHERE transaction_date >= '2025-01-01' "
+        "AND transaction_date < '2026-01-01'"
+    )
+    sql, defaulted = ensure_default_period(original)
+    assert defaulted is False
+    assert sql == original
+
+
+def test_default_period_not_injected_when_week_ending_date_already_present():
+    original = "SELECT SUM(pack_units) FROM sales WHERE week_ending_date = '2026-09-27'"
+    sql, defaulted = ensure_default_period(original)
+    assert defaulted is False
+    assert sql == original
+
+
+def test_strip_no_period_marker_removes_leading_comment_line():
+    sql, no_period = strip_no_period_marker(
+        "-- NO_PERIOD\nSELECT COUNT(*) FROM sales WHERE data_source = 'distributor'"
+    )
+    assert no_period is True
+    assert sql == "SELECT COUNT(*) FROM sales WHERE data_source = 'distributor'"
+    assert "NO_PERIOD" not in sql
+
+
+def test_strip_no_period_marker_absent_is_noop():
+    original = "SELECT COUNT(*) FROM sales"
+    sql, no_period = strip_no_period_marker(original)
+    assert no_period is False
+    assert sql == original
+
+
+def test_ensure_default_period_force_no_period_skips_injection_even_without_where():
+    original = "SELECT COUNT(*) FROM sales"
+    sql, defaulted = ensure_default_period(original, force_no_period=True)
+    assert defaulted is False
+    assert sql == original
+    assert "mo_offset" not in sql
+
+
+def test_ensure_default_period_force_no_period_skips_injection_with_other_filters():
+    original = "SELECT COUNT(*) FROM sales WHERE data_source = 'distributor'"
+    sql, defaulted = ensure_default_period(original, force_no_period=True)
+    assert defaulted is False
+    assert sql == original
+
+
+def test_qa_report_c2_all_time_total_transactions_repro():
+    """Report's second repro case: 'across all time' must not get R3M-ed."""
+    raw = (
+        "-- NO_PERIOD\nSELECT COUNT(*) AS total_transactions FROM sales "
+        "WHERE data_source = 'distributor' AND brand_flag = 1"
+    )
+    sql, no_period = strip_no_period_marker(raw)
+    final_sql, defaulted = ensure_default_period(sql, force_no_period=no_period)
+    assert defaulted is False
+    assert "mo_offset" not in final_sql
+
+
+def test_qa_report_c2_qtr_comparison_not_corrupted_by_r3m():
+    """Report's first repro case: a Q1-2026-vs-Q1-2025 query already scoped by
+    period_qtr must not also get mo_offset IN (0,1,2) added on top of it."""
+    raw_sql = (
+        "SELECT SUM(CASE WHEN period_qtr = '2026-Q1' THEN pack_units END) AS q1_2026, "
+        "SUM(CASE WHEN period_qtr = '2025-Q1' THEN pack_units END) AS q1_2025 "
+        "FROM sales WHERE drug_name = 'ZENOVAX' AND data_source = 'distributor' "
+        "AND period_qtr IN ('2026-Q1', '2025-Q1')"
+    )
+    sql, no_period = strip_no_period_marker(raw_sql)
+    final_sql, defaulted = ensure_default_period(sql, force_no_period=no_period)
+    assert defaulted is False
+    assert "mo_offset" not in final_sql
 
 
 def test_legitimate_query_not_blocked_by_c1_guards():

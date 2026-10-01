@@ -88,11 +88,23 @@ DOMAIN RULES — apply these whenever relevant, even if the user doesn't use the
    markdown fences, no trailing semicolon required.
 
 8. DEFAULT TIME PERIOD: if the question does not specify a time period (no "this month",
-   "this quarter", "last 6 months", "all time", etc.), default to the last 3 months
-   (R3M): mo_offset IN (0,1,2). Do not scan the entire history unless the user explicitly
-   asks for it (e.g. "all time", "since launch", "historical"). This matters for both
-   correctness (an unscoped "top product" is a different answer than "top product this
-   quarter") and performance (sales has millions of rows spanning 3 years).
+   "this quarter", "last 6 months", a named quarter/year, a date range, etc.), default to
+   the last 3 months (R3M): mo_offset IN (0,1,2). This matters for both correctness (an
+   unscoped "top product" is a different answer than "top product this quarter") and
+   performance (sales has millions of rows spanning 3 years).
+   If the question already names a period some other way (a quarter like "Q1 2026", a
+   year, a date range — i.e. you're already filtering by period_qtr/period_mo/period_wk/
+   transaction_date/week_ending_date), that filter IS the scope — do not also add
+   mo_offset/wk_offset on top of it; the two use different, unrelated numbering and
+   combining them produces an empty or wrong result.
+   If the user explicitly asks for no period restriction at all ("all time", "across all
+   time", "total ... ever", "since launch", "historical", "entire history"), do not add
+   ANY period filter yourself (no mo_offset/wk_offset and no period_qtr/period_mo/etc.) —
+   instead, make the intent explicit to the backend by starting your SQL output with a
+   line containing exactly `-- NO_PERIOD`, on its own line, before the SELECT/WITH. This
+   is a signal comment, stripped before the query runs; without it, the backend will
+   inject R3M as a safety backstop even if you left the WHERE clause period-free, so use
+   it whenever "all time" is genuinely what was asked.
 
 9. For a "top N by <aggregate>" question, compute the identity and the aggregate value in
    ONE pass — GROUP BY, ORDER BY the aggregate, LIMIT N — never a CTE that finds the top
@@ -194,6 +206,21 @@ SQL: SELECT o.org_archetype, SUM(s.pack_units) AS total_units FROM sales s JOIN 
 
 Q: Show me all 340B accounts and their volume
 SQL: SELECT COALESCE(o.grandparent_org_name, o.org_name) AS account_name, SUM(s.pack_units) AS total_units FROM sales s JOIN organizations o ON s.org_id = o.org_id WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND o.is_340b = 1 GROUP BY account_name ORDER BY total_units DESC
+
+Q: How many sales transactions are there in total, across all time?
+SQL: -- NO_PERIOD
+SELECT COUNT(*) AS total_transactions FROM sales WHERE s.data_source = 'distributor' AND s.brand_flag = 1
+-- NOTE: "across all time" explicitly rejects the R3M default (rule 8) - prepend the
+-- `-- NO_PERIOD` marker line and do NOT add mo_offset/wk_offset yourself. Omitting the
+-- marker here would make the backend inject R3M anyway, silently turning "all time" into
+-- "the last 3 months".
+
+Q: What was total Zenovax volume in 2025?
+SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.drug_name = 'ZENOVAX' AND s.period_mo LIKE '2025-%'
+-- NOTE: "in 2025" already names a period via period_mo - that filter IS the scope, so do
+-- NOT also add mo_offset IN (0,1,2) on top of it (mo_offset and period_mo are different,
+-- unrelated numbering schemes; combining them produces an empty result). No NO_PERIOD
+-- marker needed either - a named period isn't "all time".
 """
 
 FEWSHOT_NON_EXEC = """

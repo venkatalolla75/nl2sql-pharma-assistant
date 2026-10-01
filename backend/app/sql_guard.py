@@ -74,7 +74,17 @@ _LIMIT_CLAUSE = re.compile(r"\blimit\s+\d+\s*;?\s*$", re.IGNORECASE)
 DEFAULT_PERIOD_MO_OFFSETS = "0,1,2"  # R3M — must match periods.py's own R3M pattern
 
 _SALES_TABLE = re.compile(r"\bsales\b", re.IGNORECASE)
-_OFFSET_COLUMN = re.compile(r"\b(mo_offset|wk_offset)\b", re.IGNORECASE)
+
+# QA report (C2): the old check only recognized mo_offset/wk_offset as "already scoped",
+# so a query that named a period a different way — period_qtr/period_mo/period_wk,
+# transaction_date, week_ending_date — got R3M jammed on top of it anyway, producing
+# empty or self-contradictory results ("153,842 ... across all time for the last 3
+# months"). Broadened to every column that can express a time restriction on sales.
+_PERIOD_PRESENT = re.compile(
+    r"\b(mo_offset|wk_offset|period_qtr|period_mo|period_wk|"
+    r"transaction_date|week_ending_date)\b",
+    re.IGNORECASE,
+)
 _SALES_ALIAS = re.compile(r"\bsales\s+(?:as\s+)?([a-zA-Z_]\w*)\b", re.IGNORECASE)
 _WHERE_KEYWORD = re.compile(r"\bwhere\b", re.IGNORECASE)
 _CLAUSE_BOUNDARY = re.compile(r"\b(group\s+by|order\s+by|limit)\b", re.IGNORECASE)
@@ -95,12 +105,19 @@ def _period_filter_expr(scope_text: str) -> str:
     )
 
 
-def ensure_default_period(sql: str) -> tuple[str, bool]:
+def ensure_default_period(sql: str, force_no_period: bool = False) -> tuple[str, bool]:
     """Returns (sql, defaulted) - sql unchanged if nothing needed it; otherwise sql
     with a default `mo_offset IN (0,1,2)` filter injected into every WHERE clause that
-    scopes a `sales` reference and doesn't already filter by an offset column, and
-    defaulted=True, so the caller can make sure the answer states that a default period
-    was applied.
+    scopes a `sales` reference and doesn't already filter by ANY period column
+    (mo_offset/wk_offset/period_qtr/period_mo/period_wk/transaction_date/
+    week_ending_date — see _PERIOD_PRESENT), and defaulted=True, so the caller can make
+    sure the answer states that a default period was applied.
+
+    force_no_period=True skips injection entirely — set this when the SQL-generation
+    step emitted the NO_PERIOD marker (see strip_no_period_marker), meaning the user
+    explicitly asked for all-time/unscoped history. A regex can't read intent (an
+    explicit "all time" ask looks identical, text-wise, to a forgotten period), so that
+    signal has to come from the model, not a post-hoc guess here.
 
     Known gap: a sales-touching scope that has NO WHERE clause of its own, while some
     OTHER scope earlier in the query does (e.g. a CTE base query filtering products),
@@ -110,13 +127,13 @@ def ensure_default_period(sql: str) -> tuple[str, bool]:
     none anywhere in the whole query, both of which this function handles), so not
     chased further; falls back to the prompt-level default same as before this existed.
     """
-    if not _SALES_TABLE.search(sql):
+    if force_no_period or not _SALES_TABLE.search(sql):
         return sql, False
 
     wheres = list(_WHERE_KEYWORD.finditer(sql))
 
     if not wheres:
-        if _OFFSET_COLUMN.search(sql):
+        if _PERIOD_PRESENT.search(sql):
             return sql, False
         filter_expr = _period_filter_expr(sql)
         boundary_match = _CLAUSE_BOUNDARY.search(sql)
@@ -129,7 +146,7 @@ def ensure_default_period(sql: str) -> tuple[str, bool]:
         before = sql[scope_start:wm.start()]  # this scope's FROM/JOIN clause(s)
         next_start = wheres[idx + 1].start() if idx + 1 < len(wheres) else len(sql)
         after = sql[wm.end():next_start]  # this WHERE's own predicate list
-        if _SALES_TABLE.search(before) and not _OFFSET_COLUMN.search(after):
+        if _SALES_TABLE.search(before) and not _PERIOD_PRESENT.search(after):
             insertions.append((wm.end(), _period_filter_expr(before)))
         scope_start = wm.end()
 
@@ -140,6 +157,25 @@ def ensure_default_period(sql: str) -> tuple[str, bool]:
     for pos, filter_expr in sorted(insertions, key=lambda x: -x[0]):
         result = f"{result[:pos]} {filter_expr} AND{result[pos:]}"
     return result, True
+
+
+# PostgreSQL ignores an unknown comment, so a literal "-- NO_PERIOD" line never reaches
+# the database — it's a signal from the SQL-generation step (see prompts.py rule 8) to
+# the backend, consumed and stripped here before the SQL is validated/run. Explicit
+# all-time intent has to come from the model: text-level regex can't tell "all time"
+# apart from a forgotten period filter, and the opposite failure (silently scanning the
+# full 2M-row/3-year table whenever ANY unrecognized phrasing shows up) is worse.
+_NO_PERIOD_MARKER = re.compile(r"^\s*--\s*NO_PERIOD\b[^\n]*\n?", re.IGNORECASE)
+
+
+def strip_no_period_marker(sql: str) -> tuple[str, bool]:
+    """Returns (sql, no_period) — sql with a leading `-- NO_PERIOD` marker line removed
+    if present, and no_period=True in that case (pass through to ensure_default_period's
+    force_no_period). sql unchanged and no_period=False if no marker is present."""
+    match = _NO_PERIOD_MARKER.match(sql)
+    if not match:
+        return sql, False
+    return sql[match.end():], True
 
 
 class SqlValidationError(Exception):

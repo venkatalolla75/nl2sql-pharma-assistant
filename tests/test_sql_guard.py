@@ -183,3 +183,70 @@ def test_non_select_first_word_rejected():
 def test_empty_sql_rejected():
     with pytest.raises(SqlValidationError):
         validate_and_finalize("   ", "exec")
+
+
+# ---------------------------------------------------------------------------
+# C1 (QA report, critical): set_config() inside a generated query let a RAM/Director
+# override the session GUCs the OLD RLS policies trusted, reading any territory/region.
+# The real fix is DB-level (db/02_security.sql: RLS now keyed on session_user via
+# per-scope login roles, not a settable GUC at all — see test_db_security.py's
+# test_c1_* tests, which prove the leak is closed even with sql_guard bypassed
+# entirely). This block is the app-layer second line of defense: reject the attack
+# before it ever reaches the database. All four payloads below are taken directly from
+# the QA report (the literal "Example payload" SQL, plus the set_config/current_setting
+# calls described in its table of confirmed bypasses).
+# ---------------------------------------------------------------------------
+
+QA_REPORT_C1_PAYLOADS = [
+    # The report's own runnable "Example payload": leak Texas data as a New York RAM.
+    "SELECT t.n FROM (SELECT set_config('app.current_territory','Texas',true) AS x) c "
+    "CROSS JOIN LATERAL (SELECT count(*) AS n FROM sales WHERE c.x IS NOT NULL) t",
+    # Escalate to director-of-West via set_config('app.current_role', ...).
+    "SELECT t.n FROM (SELECT set_config('app.current_role','director',true), "
+    "set_config('app.current_region','West',true) AS x) c "
+    "CROSS JOIN LATERAL (SELECT count(*) AS n FROM sales WHERE c.x IS NOT NULL) t",
+    # Loop all 15 territories in one query (report's third confirmed bypass variant).
+    "SELECT zt.territory_name, (SELECT set_config('app.current_territory', "
+    "zt.territory_name, true)), count(*) FROM sales s "
+    "JOIN organizations o ON o.org_id = s.org_id "
+    "JOIN zip_territory zt ON zt.zip = o.zip GROUP BY zt.territory_name",
+    # current_setting() — set_config's "read sibling" the report explicitly calls out.
+    "SELECT current_setting('app.current_territory')",
+]
+
+
+@pytest.mark.parametrize("attack_sql", QA_REPORT_C1_PAYLOADS)
+def test_c1_qa_report_attack_payloads_rejected_as_ram(attack_sql):
+    with pytest.raises(SqlValidationError):
+        validate_and_finalize(attack_sql, "ram")
+
+
+def test_c1_unicode_escaped_identifier_rejected():
+    """A word-based filter alone can be bypassed by spelling a banned word via
+    Postgres's Unicode-escape identifier/string syntax (U&"...") — the report flags
+    this explicitly. No legitimate query over this schema needs it."""
+    with pytest.raises(SqlValidationError):
+        validate_and_finalize(
+            "SELECT 1 FROM sales WHERE U&'\\0073et_config' = 1", "ram"
+        )
+
+
+def test_set_and_reset_keywords_rejected():
+    with pytest.raises(SqlValidationError):
+        validate_and_finalize("SELECT 1 FROM sales WHERE 1=1 AND set = 1", "ram")
+    with pytest.raises(SqlValidationError):
+        validate_and_finalize("SELECT 1 FROM sales WHERE 1=1 AND reset = 1", "ram")
+
+
+def test_legitimate_query_not_blocked_by_c1_guards():
+    """The new checks must not false-positive on ordinary column/table names — in
+    particular 'offset' must not trip the set/reset keyword check."""
+    sql = validate_and_finalize(
+        "SELECT COALESCE(o.grandparent_org_name, o.org_name) AS account_name, "
+        "SUM(s.pack_units) AS total_units FROM sales s "
+        "JOIN organizations o ON s.org_id = o.org_id "
+        "WHERE s.data_source = 'distributor' AND s.brand_flag = 1 "
+        "AND s.mo_offset IN (0,1,2) GROUP BY account_name ORDER BY total_units DESC",
+        "ram",
+    )
+    assert "mo_offset" in sql

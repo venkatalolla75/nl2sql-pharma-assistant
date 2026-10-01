@@ -36,7 +36,7 @@ python3 schema/generate_data.py
 
 # 2. Configure secrets
 cp .env.example .env
-# fill in POSTGRES_PASSWORD / APP_DB_PASSWORD / DEMO_USER_PASSWORD / SESSION_SECRET
+# fill in POSTGRES_PASSWORD / APP_DB_PASSWORD / SCOPE_ROLE_PASSWORD / DEMO_USER_PASSWORD / SESSION_SECRET
 # (random values are fine — generate with: python3 -c "import secrets; print(secrets.token_urlsafe(24))")
 # For Bedrock: either export AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
 # in your shell before `docker compose up`, or fill the AWS_* fields in .env directly.

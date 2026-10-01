@@ -27,6 +27,32 @@ _FORBIDDEN_TABLES = re.compile(
     r"\b(users|pg_catalog|pg_[a-z_]+|information_schema)\b", re.IGNORECASE
 )
 
+# set_config()/current_setting() let a generated query overwrite or read the session
+# GUCs (app.current_role/territory/region) the old RLS policies trusted — a RAM could
+# call set_config('app.current_territory', 'Texas', true) inside a SELECT and read any
+# territory. pg_sleep/dblink/lo_import/lo_export have no legitimate use in an analytics
+# query either. See db/02_security.sql's design note for the real fix (RLS now keyed on
+# current_user via per-scope login roles, so there's no session state left to override)
+# — this check is defense in depth, not the primary control.
+_FORBIDDEN_FUNCTIONS = re.compile(
+    r"\b(set_config|current_setting|pg_sleep|dblink|lo_import|lo_export)\b",
+    re.IGNORECASE,
+)
+
+# SET/RESET aren't valid inside a SELECT's expression context in Postgres (they're
+# utility statements, and the first-word/no-semicolon checks above already block a
+# smuggled-in second statement) - blocked anyway for defense in depth per the same
+# reasoning as _FORBIDDEN_FUNCTIONS. \b protects "offset"/"mo_offset" etc.
+_FORBIDDEN_STATEMENTS = re.compile(r"\b(set|reset)\b", re.IGNORECASE)
+
+# PostgreSQL's Unicode-escape syntax (U&"d\0065sc" decodes to the identifier "desc", or
+# U&'...' for string literals) lets you spell out banned words so the *decoded* SQL
+# contains e.g. "set_config" while the raw text never does - a classic word-list-filter
+# bypass. No legitimate NL-to-SQL query over this schema needs it (every table/column
+# name is plain ASCII), so reject the syntax outright rather than trying to decode and
+# re-check it.
+_UNICODE_ESCAPE_IDENTIFIER = re.compile(r"U&\s*['\"]", re.IGNORECASE)
+
 _WAC_COLUMN = re.compile(r"\bwac\b", re.IGNORECASE)
 
 _LIMIT_CLAUSE = re.compile(r"\blimit\s+\d+\s*;?\s*$", re.IGNORECASE)
@@ -156,6 +182,18 @@ def validate_and_finalize(sql: str, role: str) -> str:
         raise SqlValidationError(
             f"forbidden table reference in: {cleaned!r}",
             "That question touches data I don't have access to answer from.",
+        )
+
+    if _FORBIDDEN_FUNCTIONS.search(cleaned) or _FORBIDDEN_STATEMENTS.search(cleaned):
+        raise SqlValidationError(
+            f"forbidden function/statement in: {cleaned!r}",
+            "That question can't be answered from the data available to you.",
+        )
+
+    if _UNICODE_ESCAPE_IDENTIFIER.search(cleaned):
+        raise SqlValidationError(
+            f"Unicode-escape identifier/string in: {cleaned!r}",
+            "That question can't be answered from the data available to you.",
         )
 
     if role != "exec" and _WAC_COLUMN.search(cleaned):

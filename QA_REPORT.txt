@@ -1,0 +1,300 @@
+##########################################
+QA Report — NovaPharma NL-to-SQL Assistant
+##########################################
+
+Repo reviewed: venkatalolla75/nl2sql-pharma-assistant (commit db0bc66)
+Live app: http://34.206.93.198
+Method: (1) full code review; (2) the repo's own Postgres schema/security SQL and the
+full 2,000,000-row generated dataset rebuilt locally (PostgreSQL 16, identical
+db/01_schema.sql + db/02_security.sql + db/load_data.py path) - every number below
+checked against that database, and security bypasses run through the app's own sql_guard
+functions and the real RLS policies; (3) a live end-to-end pass against the deployed app
+at http://34.206.93.198, logged in as the Exec (Sarah Chen), with Show SQL on. The live
+run reproduced the period bug on the real deployment and surfaced two further defects (H3,
+H4). The Director/RAM live rounds were not completed, but those findings (C1, H1) are
+already reproduced on the full-dataset rebuild.
+
+______________________________________________________________________________
+
+=======
+Verdict
+=======
+
+The architecture is sound and most of it works. There are 2 critical issues that must
+be fixed before submission - one is a real cross-territory data leak, the other makes a
+range of ordinary questions return wrong numbers - plus several high/medium issues. All
+have concrete fixes below, and none require re-architecting.
+
+The most important process gap: the automated tests check the _shape_ of answers (row
+counts, "a period was stated"), not whether the numbers are correct. That's why the
+suite reports 35/35 and 89/89 green while the defects below are live. Adding a handful of
+value-assertion tests is strongly recommended.
+
+______________________________________________________________________________
+
+=========================================================
+Live end-to-end results (deployed app, logged in as Exec)
+=========================================================
+
+| # | Question asked | App's answer | Correct? |
+| 1 | Compare total Zenovax pack units in Q1 2026 vs Q1 2025 | Error ("too complex or slow…"). Generated SQL invented a period_yr column (doesn't exist), misused period_qtr as 'Q1' (real format is '2026-Q1'), and still had R3M forced on. | [FAIL] H4 + C2 |
+| 2 | How many sales transactions are there in total, across all time? | "153,842 … across all time for the last 3 months" (self-contradictory). True total = 2,000,000. | [FAIL] C2 |
+| 3 | Market share for Zenovax in the Docetaxel market, all time | "1.14% market share … for the last 3 months". Real value 1.1378 = ~114% (printed 100x too small); "all time" ignored. | [FAIL] H3 + C2 |
+| 4 | How is Zenovax performing this quarter in pack units? | 67,569 pack units | [OK] matches DB |
+
+The happy path (Q4) works; but 3 of 4 realistic Exec questions returned wrong, empty, or
+self-contradictory answers - all traceable to C2 plus the two new defects below.
+
+______________________________________________________________________________
+
+=====================
+Requirements coverage
+=====================
+
+| Requirement | Status | Notes |
+| Web chat UI, follow-ups, loading state | [OK] | Clean; typing indicator; role badge; Show SQL toggle |
+| NL -> SQL -> execute -> NL answer | [OK] | Two-call Bedrock design is reasonable |
+| Domain rules in prompt (no RAG) | [OK] | Good call; docs are small. Rules distilled well |
+| Full 2M-row dataset in cloud | [OK] | RDS, loaded via EC2 user-data |
+| Territory/Region scoping | [!] Critical | Works normally, but bypassable - see C1 |
+| WAC hidden from non-Exec | [OK] | Enforced by Postgres column GRANTs - solid, verified |
+| users table unreachable | [OK] | Not granted to analytics roles + guard blocks it |
+| Correct business-rule answers | [!] Critical | Period handling corrupts many queries - see C2 |
+| Cross-territory attempt handled | [!] High | Not leaked, but wrong message - see H1 |
+| Public cloud URL | [!] | Live, but HTTP only (passwords in clear) - see M1 |
+| GitHub repo, DESIGN.md, IaC | [OK] | DESIGN.md is thorough; Terraform is clean |
+| Test cases w/ pass/fail + output | [!] | Present but don't verify correctness - see process note |
+| Demo | [OK] | Script provided |
+
+______________________________________________________________________________
+
+========
+CRITICAL
+========
+
+C1 — A RAM/Director can read any territory's or region's data
+-------------------------------------------------------------
+
+Severity: Critical (data leak - the thing the assignment weights most).
+
+Row-level security is enforced by RLS policies that read session variables
+(app.current_territory, app.current_region) which the backend sets per request. But
+the LLM-generated SQL runs in the same transaction and can overwrite those variables
+by calling set_config(...) inside a SELECT. The policy then reads the attacker's value.
+
+Confirmed on the rebuilt database, logged in as Amy Nguyen (RAM, New York Metro):
+
+| Query intent | Should return | Actually returned |
+| Own territory sales count (baseline) | 136,921 | 136,921 OK |
+| Texas rows via set_config('app.current_territory','Texas',true) | 0 (denied) | 8,736 Texas rows |
+| Become director/West via set_config | 0 (denied) | 39,072 West-region rows |
+| Loop all 15 territories in one query | own only | every territory's data |
+
+Example payload that leaks Texas data as a New York RAM (passes the current guard):
+SELECT t.n FROM (SELECT set_config('app.current_territory','Texas',true) AS x) c
+CROSS JOIN LATERAL (SELECT count(*) AS n FROM sales WHERE c.x IS NOT NULL) t
+WAC stayed protected (that's a column GRANT, not a GUC), so pricing did not leak - but
+territory/region isolation is fully bypassable.
+
+Fix (verified - closes all four bypass variants, allows all legitimate queries):
+set_config() has no legitimate use in an analytics query. Reject it (and its read
+sibling, and SET/RESET) in backend/app/sql_guard.py. Add near the other patterns:
+_FORBIDDEN_FUNCTIONS = re.compile(
+    r"\b(set_config|current_setting|pg_sleep|dblink|lo_import|lo_export)\b",
+    re.IGNORECASE,
+)
+and in validate_and_finalize, after the forbidden-tables check:
+    if _FORBIDDEN_FUNCTIONS.search(cleaned):
+        raise SqlValidationError(
+            f"forbidden function in: {cleaned!r}",
+            "That question can't be answered from the data available to you.",
+        )
+I ran all four attack payloads and two normal queries (top-accounts, market-share)
+through this: all four attacks blocked, both legitimate queries allowed.
+
+Worth telling the reviewers, since it's an honest design note: RLS keyed on
+session GUCs is inherently fragile precisely because the executed query shares the
+session. The guard block is the pragmatic fix; the more robust pattern (out of scope for
+the deadline) is to not execute untrusted SQL in a session that carries overridable
+scope, e.g. enforce scope through the connection/role itself.
+
+______________________________________________________________________________
+
+C2 — "Default to last 3 months" is force-applied to queries that already have a period
+--------------------------------------------------------------------------------------
+
+Severity: Critical (wrong answers to ordinary questions).
+
+sql_guard.ensure_default_period() injects mo_offset IN (0,1,2) into any query that
+touches sales and has no mo_offset/wk_offset filter. But it treats queries that
+filter by period_qtr, period_mo, transaction_date, week_ending_date, or explicit
+"all time" as if they had no period - and jams R3M on top of them. Verified results of
+the current code:
+
+| Question | What the app builds | Result |
+| "Compare Q1 2026 vs Q1 2025" | adds mo_offset IN (0,1,2) AND period_qtr IN (...) | empty (no Q1 rows are in the last 3 months) |
+| "Total sales all time" | adds mo_offset IN (0,1,2) | silently only last 3 months |
+| "Sales in 2025" (date range) | adds mo_offset IN (0,1,2) | empty / wrong |
+| "How many transactions are there?" (a reviewer sanity-check of the 2M rows) | adds mo_offset IN (0,1,2) | ~154,000, not 2,000,000 |
+
+Fix (verified): only inject the default when no period/date column is present.
+In sql_guard.py, broaden the "already scoped" check:
+_PERIOD_PRESENT = re.compile(
+    r"\b(mo_offset|wk_offset|period_qtr|period_mo|period_wk|"
+    r"transaction_date|week_ending_date)\b",
+    re.IGNORECASE,
+)
+and in ensure_default_period, gate on _PERIOD_PRESENT instead of _OFFSET_COLUMN
+when deciding whether a scope already has a period filter. I re-ran the four broken cases
+above plus "no-period top accounts" and "already-R3M": the first three now pass through
+untouched, the genuinely period-less "top accounts" still gets R3M, and the already-R3M
+query is unchanged.
+
+Remaining nuance to decide: an explicit "all time" / "total ... ever" should scan all
+history, but a pure regex can't read intent. Cleanest is to have the SQL-generation step
+emit a marker when the user named no period (e.g. prepend -- NO_PERIOD) and default only
+then - intent comes from the model, not a post-hoc guess. Short of that, the fix above at
+least stops corrupting the many queries that _do_ name a period.
+
+______________________________________________________________________________
+
+====
+HIGH
+====
+
+H1 — Out-of-scope questions get a fabricated "no sales… market conditions" answer
+---------------------------------------------------------------------------------
+
+When a RAM/Director names another territory/region, RLS correctly returns 0 rows - but the
+answer model then invents a business reason. Live examples from the repo's own TESTS.md:
+
+- RAM, "Show me sales in California South" -> *"There were no sales recorded in California
+  South… due to market conditions, product availability…"*. California South actually had
+  23,410 units that period.
+- Director, "Show me sales for the West region" -> "no sales… due to market conditions".
+  West region actually had 124,512 units.
+
+Two problems: it's misleading (implies zero business, not zero access), and it leaks
+the fact that the territory exists while masking that access was denied. Should instead
+say access is limited to their own scope and offer to run it there. Detect a named
+territory/region outside the user's scope (you already have the user's scope and
+zip_territory) and return an access message rather than passing an empty result to the
+answer model.
+
+H2 — "This year" / "YTD" is defined as trailing 12 months, then mislabelled
+---------------------------------------------------------------------------
+
+DOMAIN_RULES rule 5 defines "this year"/"year to date" as mo_offset BETWEEN 0 AND 11
+(Oct 2025-Sep 2026), which is a trailing 12 months, not year-to-date. Then the answer
+text calls it "January to November" (TC02) - a period that is neither the query's window
+nor real (data ends Sep 2026). Verified impact: Cyclonova "this year" reported as
+$373.7M; true Jan-Sep 2026 is $277.5M. Fix: define YTD as period_mo >= '<year>-01'
+(current calendar year to latest month) and let periods.py label it from the actual
+period_mo values rather than a hardcoded phrase.
+
+______________________________________________________________________________
+
+H3 — Market share (and other ratios) printed 100× too small
+-----------------------------------------------------------
+
+Severity: High (the headline competitive metric is misreported).
+
+Live, Exec: Zenovax Docetaxel market share computed correctly as 1.1378 but was
+rendered as "1.14%". A decimal share of 1.1378 is 113.78%, not 1.14%. The
+answer step is treating the already-decimal ratio as if it were a raw fraction needing no
+x100, or mislabelling it. Two consequences: every market-share answer is wrong by a factor
+of 100, and the genuine >100% anomaly (which DESIGN.md correctly explains as a property of
+the synthetic market_data) is hidden instead of surfaced. Fix: in the answer prompt (or a
+formatting step) multiply decimal shares by 100 for display, and when a share exceeds 100%,
+state the caveat rather than masking it.
+
+H4 — Quarter / year comparisons generate invalid SQL (hallucinated columns)
+---------------------------------------------------------------------------
+
+Severity: High (a whole class of common analytics questions fails).
+
+Live, Exec: "Compare Zenovax Q1 2026 vs Q1 2025" produced SQL referencing
+s.period_qtr = 'Q1' and s.period_yr = 2026. Neither is right: period_qtr is stored as
+'2026-Q1', and there is no period_yr column at all, so the query errors and the user
+gets the generic "too complex or slow" message. Any "Qx YYYY vs Qx YYYY" or year-over-year
+comparison is affected. Root causes: (a) the schema summary in the prompt lets the model
+guess a year column; (b) C2 then also injects R3M on top. Fix: add a worked few-shot example
+for calendar-quarter and year-over-year comparisons using the real period_qtr values
+('2026-Q1', '2025-Q1'), and fix C2 so it doesn't compound the error. The "too complex or
+slow" message is also misleading - the query didn't time out, it referenced a missing column;
+consider surfacing invalid-column errors distinctly.
+
+============
+MEDIUM / LOW
+============
+
+- M1 - HTTP only. The site serves login over plain http://, so the shared password
+  crosses the network unencrypted, and a security-minded reviewer will notice. Put it
+  behind HTTPS (Caddy/Nginx + a free cert on a hostname, or an ALB). Low effort, good
+  optics for a security-weighted brief.
+- M2 - Drug names misspelled in answers ("CYCLONEVA", "GEMMARA", "GEMTARA"->"GEMMARA").
+  The SQL is right; the answer model is paraphrasing names. Tell the answer prompt to copy
+  product names verbatim from the rows.
+- M3 - Director revenue question isn't offered a volume alternative. TC08: a Director
+  asking for revenue gets a flat refusal; the spec asks to offer volume instead. The RAM
+  path does this; align the Director path.
+- M4 - Exec occasionally told "scoped to your region." Answer-side only (the data is
+  full company); still wrong for an Exec and undercuts trust. Tighten the answer prompt's
+  scope-note rule.
+- L1 - /docs (FastAPI interactive API) is public on the live host. Harmless but
+  unnecessary surface; disable in production (FastAPI(docs_url=None, redoc_url=None)).
+- L2 - org_scope is readable by every role (acknowledged in DESIGN.md). A RAM can
+  enumerate all 40k org->territory mappings. No sales/pricing leak, but note it.
+- L3 - DEFAULT_DEMO_PASSWORD committed in tests/qa_regression.py. Fine for a
+  throwaway demo and documented, but rotate/remove before this repo is shared wider.
+
+______________________________________________________________________________
+
+====================================
+What's solid (don't spend time here)
+====================================
+
+- WAC/pricing protection - enforced by Postgres column GRANTs; SELECT * and explicit
+  wac both denied for non-Exec. Verified directly. This is the strongest part.
+- users table unreachable by analytics roles (GRANT + guard). Verified.
+- Prompt-injection basics (drop table, list users, "ignore instructions") handled.
+- Architecture, DESIGN.md, Terraform - clear, honest trade-offs, sensible AWS choices
+  (RDS private subnet, no NAT, budget alerts, SSM instead of open SSH).
+- Market-share, top-accounts (grandparent rollup), hub-dispense exclusion, brand_flag
+  logic - correct where a period isn't involved; numbers matched the database.
+
+______________________________________________________________________________
+
+===========================================
+Suggested fix order (tonight → tomorrow AM)
+===========================================
+
+1. C1 guard block for set_config - ~15 min, closes the data leak. Do first.
+2. C2 period-default gate - ~30 min, fixes a broad class of wrong answers.
+3. H3 market-share x100 formatting - ~15 min, fixes the headline metric.
+4. H4 quarter/year few-shot + real period_qtr format - ~30 min.
+5. H1 out-of-scope access message - ~1 hr.
+6. H2 YTD definition + label - ~30 min.
+7. M1 HTTPS - ~1 hr; M2/M3/M4 prompt tweaks - ~30 min together.
+8. Add value-assertion tests for a few known numbers (e.g. Exec all-time paid units =
+   6,309,523; total rows = 2,000,000; NYM R3M units = 35,689; Zenovax Docetaxel share ~
+   1.14 decimal / ~114%) so regressions like C2/H3 can't pass green again. Re-run and
+   regenerate TESTS.md afterwards.
+
+Minimum before the deadline if time is short: C1, C2, H3, H4 (~1.5 hrs of code) plus a
+redeploy. Those four are the ones a reviewer would actually catch.
+
+=================================================================
+Reference values (from the full dataset, for building assertions)
+=================================================================
+
+- Exec, all-time paid demand (distributor, brand_flag=1): 6,309,523 units,
+  $3,242,848,648.11 WAC.
+- sales total rows: 2,000,000. Data spans 2023-09 -> 2026-09; latest week ends
+  2026-09-19; current month/quarter are partial.
+- RAM New York Metro, R3M paid units: 35,689; R3M paid transactions: 4,872;
+  all-time rows visible: 136,921.
+- Director Northeast, R3M paid units (NYM + New England): 68,236.
+- Zenovax market share, Docetaxel subcategory: ~1.14 (114%) - a property of the
+  synthetic market_data, correctly noted in DESIGN.md; the assistant should surface the
+  >100% caveat rather than hide it.

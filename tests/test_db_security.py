@@ -132,3 +132,65 @@ def test_reference_tables_unrestricted_for_every_role():
             assert cur.fetchone()[0] == 40
             cur.execute("SELECT count(*) FROM zip_territory")
             assert cur.fetchone()[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# C1 (QA report, critical): confirms the fix at the layer that actually matters — these
+# run the report's attack payloads directly through scoped_cursor, with no sql_guard
+# involved at all, proving the leak is closed by *which role the connection
+# authenticated as* (RLS keyed on session_user — db/02_security.sql), not by the
+# app-layer word-blocklist in sql_guard.py (test_sql_guard.py's test_c1_* tests cover
+# that second, independent layer). Reference values match the QA report exactly: New
+# York Metro RAM sees 136,921 rows; Texas alone has 8,736; West region has 39,072.
+# ---------------------------------------------------------------------------
+
+def test_c1_set_config_cannot_leak_another_territory():
+    """QA report's literal 'Example payload', run raw against the DB."""
+    with scoped_cursor("ram", "New York Metro", "Northeast") as cur:
+        cur.execute("SELECT count(*) FROM sales")
+        baseline = cur.fetchone()[0]
+        cur.execute(
+            "SELECT t.n FROM (SELECT set_config('app.current_territory','Texas',true) "
+            "AS x) c CROSS JOIN LATERAL (SELECT count(*) AS n FROM sales "
+            "WHERE c.x IS NOT NULL) t"
+        )
+        attacked = cur.fetchone()[0]
+    assert baseline == 136_921
+    assert attacked == baseline  # must NOT be Texas's 8,736
+
+
+def test_c1_set_config_cannot_escalate_to_director_of_another_region():
+    with scoped_cursor("ram", "New York Metro", "Northeast") as cur:
+        cur.execute("SELECT count(*) FROM sales")
+        baseline = cur.fetchone()[0]
+        cur.execute(
+            "SELECT t.n FROM (SELECT set_config('app.current_role','director',true), "
+            "set_config('app.current_region','West',true) AS x) c "
+            "CROSS JOIN LATERAL (SELECT count(*) AS n FROM sales "
+            "WHERE c.x IS NOT NULL) t"
+        )
+        attacked = cur.fetchone()[0]
+    assert attacked == baseline  # must NOT be West region's 39,072
+
+
+def test_c1_looping_all_territories_only_ever_shows_own_scope():
+    with scoped_cursor("ram", "New York Metro", "Northeast") as cur:
+        cur.execute(
+            "SELECT zt.territory_name, "
+            "(SELECT set_config('app.current_territory', zt.territory_name, true)), "
+            "count(*) FROM sales s "
+            "JOIN organizations o ON o.org_id = s.org_id "
+            "JOIN zip_territory zt ON zt.zip = o.zip GROUP BY zt.territory_name"
+        )
+        rows = cur.fetchall()
+    assert [r[0] for r in rows] == ["New York Metro"]  # every other territory: 0 rows
+    assert rows[0][2] == 136_921
+
+
+def test_c1_set_config_no_effect_even_run_before_any_real_query():
+    """Belt and suspenders: attempt the override as the very first statement in the
+    transaction, before org_in_scope's usual query shape, in case ordering mattered."""
+    with scoped_cursor("ram", "New York Metro", "Northeast") as cur:
+        cur.execute("SELECT set_config('app.current_territory', 'Texas', true)")
+        cur.execute("SELECT count(*) FROM sales")
+        assert cur.fetchone()[0] == 136_921

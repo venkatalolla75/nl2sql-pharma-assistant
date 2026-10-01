@@ -8,22 +8,31 @@ Env vars (all required, read at runtime — nothing here is hardcoded):
     POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
         -> superuser/bootstrap connection used to create schema, roles, and load data.
     APP_DB_PASSWORD
-        -> password to set on the app_login role that the FastAPI backend connects as.
+        -> password to set on the app_login role (auth-only — the /login lookup
+           against `users`; never used for analytics queries, see db/02_security.sql).
+    SCOPE_ROLE_PASSWORD
+        -> shared password set on app_exec and every per-territory/per-region analytics
+           login role this script provisions (see provision_scope_roles() below and
+           db/02_security.sql's C1 design note for why these are separate LOGIN
+           identities rather than one shared role plus a settable session GUC).
     DEMO_USER_PASSWORD
         -> shared demo password for the 23 seeded users (see db/seed_users.py). Never
            committed; must be supplied at load time.
 
 Order of operations:
-    1. Run 01_schema.sql (tables, PKs/FKs only)
-    2. Run 02_security.sql (roles, grants, RLS, org_in_scope() function)
-    3. Set app_login's password from APP_DB_PASSWORD (LOGIN granted here, not in the SQL file)
+    1. Run 01_schema.sql (tables, PKs/FKs only, including role_scope)
+    2. Run 02_security.sql (app_login/app_exec/template roles, grants, RLS)
+    3. Set app_login's and app_exec's passwords (LOGIN granted here, not in the SQL file)
     4. COPY organizations, products, zip_territory, sales from schema/generated/*.csv
-    5. Insert the 23 seeded users with bcrypt-hashed passwords
-    6. Populate org_scope from organizations JOIN zip_territory ON zip
-    7. Run 03_indexes.sql (secondary indexes + ANALYZE)
+    5. Provision per-territory/per-region LOGIN roles from zip_territory's now-loaded
+       distinct territory/region names (needs step 4's zip_territory data first)
+    6. Insert the 23 seeded users with bcrypt-hashed passwords
+    7. Populate org_scope from organizations JOIN zip_territory ON zip
+    8. Run 03_indexes.sql (secondary indexes + ANALYZE)
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -76,6 +85,62 @@ def run_sql_file(cur, path: Path):
     cur.execute(path.read_text())
 
 
+def _slugify(name: str) -> str:
+    """'New York Metro' -> 'new_york_metro'. Must match backend/app/db.py's copy exactly
+    (duplicated rather than shared-imported — this script runs standalone, not as part
+    of the `app` package; see that module for why)."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def provision_scope_roles(cur, scope_role_password: str):
+    """Create one LOGIN role per territory (app_ram__<slug>) and per region
+    (app_director__<slug>), each a member of the app_ram/app_director template role
+    (inheriting its column-level grants), and record the mapping in role_scope. Needs
+    zip_territory's data already loaded. See db/02_security.sql's C1 design note for why
+    this replaces a single shared app_ram/app_director role plus a settable session GUC.
+    Idempotent: safe to re-run (e.g. redeploying against an already-loaded database, or
+    rotating SCOPE_ROLE_PASSWORD)."""
+    print("=== Provisioning per-territory/per-region DB login roles ===")
+    cur.execute("SELECT DISTINCT territory_name FROM zip_territory ORDER BY 1")
+    territories = [r[0] for r in cur.fetchall()]
+    cur.execute("SELECT DISTINCT region_name FROM zip_territory ORDER BY 1")
+    regions = [r[0] for r in cur.fetchall()]
+
+    cur.execute("TRUNCATE TABLE role_scope")
+
+    scopes = (
+        [("app_ram", "territory", t) for t in territories]
+        + [("app_director", "region", r) for r in regions]
+    )
+    for template_role, scope_type, scope_name in scopes:
+        pg_role = f"{template_role}__{_slugify(scope_name)}"
+        cur.execute(
+            sql.SQL(
+                "DO $$ BEGIN "
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {role_lit}) THEN "
+                "CREATE ROLE {role} NOLOGIN; "
+                "END IF; END $$;"
+            ).format(role=sql.Identifier(pg_role), role_lit=sql.Literal(pg_role))
+        )
+        cur.execute(
+            sql.SQL("GRANT {template} TO {role}").format(
+                template=sql.Identifier(template_role), role=sql.Identifier(pg_role)
+            )
+        )
+        cur.execute(
+            sql.SQL("ALTER ROLE {role} WITH LOGIN PASSWORD {pw}").format(
+                role=sql.Identifier(pg_role), pw=sql.Literal(scope_role_password)
+            )
+        )
+        cur.execute(
+            "INSERT INTO role_scope (pg_role_name, scope_type, scope_name) "
+            "VALUES (%s, %s, %s)",
+            (pg_role, scope_type, scope_name),
+        )
+    print(f"  provisioned {len(scopes)} scope roles "
+          f"({len(territories)} territory + {len(regions)} region)")
+
+
 def copy_csv(cur, table: str, columns: list[str], csv_path: Path):
     cols = ", ".join(columns)
     print(f"  loading {csv_path.name} -> {table} ...")
@@ -96,6 +161,7 @@ def main():
     user = env("POSTGRES_USER")
     password = env("POSTGRES_PASSWORD")
     app_db_password = env("APP_DB_PASSWORD")
+    scope_role_password = env("SCOPE_ROLE_PASSWORD")
     demo_password = env("DEMO_USER_PASSWORD")
 
     conninfo = f"host={host} port={port} dbname={dbname} user={user} password={password}"
@@ -109,13 +175,18 @@ def main():
             print("=== Security (roles, grants, RLS) ===")
             run_sql_file(cur, DB_DIR / "02_security.sql")
 
-            print("=== app_login credentials ===")
+            print("=== app_login / app_exec credentials ===")
             # ALTER ROLE is a utility statement — it doesn't support bind parameters
             # (Postgres rejects "PASSWORD $1"). sql.Literal() safely quotes the value
             # as a SQL string constant instead.
             cur.execute(
                 sql.SQL("ALTER ROLE app_login WITH LOGIN PASSWORD {}").format(
                     sql.Literal(app_db_password)
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER ROLE app_exec WITH LOGIN PASSWORD {}").format(
+                    sql.Literal(scope_role_password)
                 )
             )
 
@@ -148,6 +219,8 @@ def main():
                  "region_number", "region_name"],
                 DATA_DIR / "zip_territory.csv",
             )
+
+            provision_scope_roles(cur, scope_role_password)
 
             print("=== Loading sales (2M rows — this takes a few minutes) ===")
             copy_csv(

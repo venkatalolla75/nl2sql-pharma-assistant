@@ -35,6 +35,7 @@ resource "aws_instance" "app" {
     rds_username       = aws_db_instance.main.username
     rds_password       = random_password.rds_master.result
     app_db_password    = random_password.app_db.result
+    scope_role_password = random_password.scope_role.result
     demo_user_password = random_password.demo_user.result
     session_secret     = random_id.session_secret.hex
     aws_region         = var.aws_region

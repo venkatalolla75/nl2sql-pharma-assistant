@@ -86,3 +86,15 @@ CREATE TABLE IF NOT EXISTS org_scope (
     territory_name  TEXT,
     region_name     TEXT
 );
+
+-- Maps a per-scope Postgres LOGIN role (app_ram__<territory>, app_director__<region>) to
+-- the territory/region it's allowed to see. Backs the RLS policies in 02_security.sql,
+-- keyed on session_user rather than a settable session GUC — see that file's design note
+-- and DESIGN.md's C1 writeup for why. Populated by db/load_data.py once zip_territory's
+-- distinct territory/region names are known (02_security.sql runs before any data is
+-- loaded, so it can't populate this itself).
+CREATE TABLE IF NOT EXISTS role_scope (
+    pg_role_name  TEXT PRIMARY KEY,
+    scope_type    TEXT NOT NULL CHECK (scope_type IN ('territory', 'region')),
+    scope_name    TEXT NOT NULL
+);

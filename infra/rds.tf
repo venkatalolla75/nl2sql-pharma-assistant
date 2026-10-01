@@ -8,6 +8,16 @@ resource "random_password" "app_db" {
   special = false
 }
 
+# Shared password for app_exec and every per-territory/per-region analytics login role
+# (app_ram__<territory>, app_director__<region>) - see db/02_security.sql's C1 design
+# note. Identity comes from which role name the backend connects as (decided server-side
+# from the authenticated user's row), not from this secret, so one shared password
+# across all of them is fine - same trust model as app_db_password already had.
+resource "random_password" "scope_role" {
+  length  = 32
+  special = false
+}
+
 resource "random_password" "demo_user" {
   length  = 20
   special = false

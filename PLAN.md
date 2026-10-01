@@ -3,6 +3,42 @@
 Living plan for the take-home assignment (source: https://github.com/cveeraiy/nl2sql-assignment).
 Updated as phases complete. See end of file for a running blocker log.
 
+## QA_REPORT.txt remediation — status (in progress)
+
+An external QA review (`QA_REPORT.txt`) found 2 critical, 4 high, and several medium/low
+issues against the full 2M-row dataset. Working through them in the report's suggested
+fix order, committing after each. This section is the live status tracker — see git log
+for full writeups per item, and `DESIGN.md`'s new "C1" section for the critical finding's
+complete before/after.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| C1 | RAM/Director can read any territory/region via `set_config()` in generated SQL | **Done** | Two-layer fix: (1) `sql_guard.py` now rejects `set_config`/`current_setting`/`SET`/`RESET`/`pg_sleep`/`dblink`/`lo_import`/`lo_export` + Unicode-escaped identifiers (`U&"..."`) that could spell a banned word past a text filter; (2) the real fix — `db/02_security.sql` RLS no longer reads a settable session GUC at all. Rewrote to ~22 per-scope Postgres LOGIN roles (`app_exec`, `app_director__<region>` ×6, `app_ram__<territory>` ×15), provisioned by `db/load_data.py`'s new `provision_scope_roles()` from the loaded `zip_territory` data, RLS keyed on `session_user` via a new `role_scope` table. `backend/app/db.py`'s `scoped_cursor()` now connects directly as the right per-scope role instead of `app_login` + `SET LOCAL ROLE` + `set_config()`. New `SCOPE_ROLE_PASSWORD` secret threaded through `docker-compose.yml`, `infra/`, `.env.example`. All 3 confirmed bypass payloads re-run directly against the DB (bypassing `sql_guard.py` entirely) after the fix: all return exactly the caller's own row count now. Tests: `test_db_security.py`'s `test_c1_*` (DB layer) + `test_sql_guard.py`'s `test_c1_*` (app layer). Also fixed in passing: `infra/templates/user_data.sh.tpl` was hardcoding `STATEMENT_TIMEOUT_MS=8000`, silently overriding the `20000` default set last session — the live deployment has actually been running at the old 8s limit this whole time. **Not yet committed** (next action). |
+| C2 | Default-period injection corrupts queries that already filter by `period_qtr`/`period_mo`/`transaction_date`/etc., or ask for explicit "all time" | Pending | Report's fix: gate `ensure_default_period` on a broader `_PERIOD_PRESENT` check, not just `mo_offset`/`wk_offset`. Also handle explicit all-time via a `NO_PERIOD` marker from the SQL-generation step. |
+| H3 | Market share rendered as "1.14%" instead of "114%" (decimal share not ×100'd) | Pending | Fix in the answer prompt/formatting step; also surface the genuine >100% anomaly as a caveat instead of hiding it. |
+| H4 | "Compare Q1 2026 vs Q1 2025" hallucinates a `period_yr` column and misuses `period_qtr` as `'Q1'` (real format `'2026-Q1'`) | Pending | Add a worked few-shot for quarter/YoY comparisons using the real `period_qtr` format; also give invalid-column DB errors a distinct message instead of "too complex or slow". |
+| H1 | Out-of-scope territory/region questions get a fabricated "no sales due to market conditions" answer instead of an access-denied message | Pending | Detect a named territory/region outside the user's scope before querying (scope + `zip_territory` are already available) and return an access message rather than passing an empty result to the answer model. |
+| H2 | "This year"/YTD defined as trailing 12 months (`mo_offset BETWEEN 0 AND 11`), then answer text calls it "January to November" regardless | Pending | Redefine as calendar-year-to-date (`period_mo >= '<year>-01'`); label from actual `period_mo` values via `periods.py`, not a hardcoded phrase. |
+| M2 | Drug names misspelled in answers (paraphrased instead of copied verbatim) | Pending | Prompt fix: copy product names verbatim from result rows. |
+| M3 | Director revenue question gets a flat refusal, not offered the volume alternative RAM already gets | Pending | Align Director path with the existing RAM behavior. |
+| M4 | Exec occasionally told "scoped to your region" (answer-side hallucination, data is full company) | Pending | Tighten `ANSWER_SYSTEM_PROMPT`'s scope-note rule further. |
+| L1 | `/docs` (FastAPI interactive API) publicly reachable on the live host | Pending | `FastAPI(docs_url=None, redoc_url=None)`. |
+| — | Value-assertion tests using the report's reference numbers (2,000,000 total rows; Exec all-time paid units 6,309,523; NYM R3M units 35,689; Director Northeast R3M units 68,236; Zenovax/Docetaxel share ~114%) | Pending | Add to both pytest and `tests/qa_regression.py`, so a wrong number can't pass green again — the report's core process-gap finding. |
+| — | Redeploy + re-run `qa_regression.py` against live + update `TESTS.md` | Pending | Final step once all fixes above land. |
+
+M1 (HTTP-only, no TLS) and L2/L3 (org_scope enumerable by any role; demo password
+committed in `qa_regression.py`) were explicitly out of scope for this remediation pass
+per the user's instructions (not in the numbered fix list) — both are already documented
+as accepted trade-offs elsewhere (DESIGN.md trade-offs section; `qa_regression.py`'s own
+docstring for L3).
+
+**Reference values from the report** (for the pending value-assertion tests): sales
+total rows 2,000,000; Exec all-time paid demand 6,309,523 units / $3,242,848,648.11 WAC;
+RAM New York Metro R3M paid units 35,689, R3M paid transactions 4,872, all-time rows
+visible 136,921 (confirmed exactly during the C1 fix); Director Northeast R3M paid units
+68,236; Zenovax/Docetaxel market share ~1.14 decimal (~114%, a genuine property of the
+synthetic `market_data`, already noted in DESIGN.md pre-C1).
+
 ## Phased Task List
 
 ### Phase 0 — Setup — done

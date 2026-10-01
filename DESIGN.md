@@ -31,7 +31,7 @@ flowchart TB
     FastAPI -- "question + history" --> Claude
     Claude -- "SQL text" --> FastAPI
     FastAPI --> SQLGuard
-    SQLGuard -- "validated SQL,\nSET ROLE + session GUCs" --> RDS
+    SQLGuard -- "validated SQL,\nper-scope DB login role" --> RDS
     RDS -- "scoped rows" --> FastAPI
     FastAPI -- "rows + question" --> Claude
     Claude -- "NL answer" --> FastAPI
@@ -144,29 +144,40 @@ fail fast and produce friendly errors, not because they're trusted alone.
    verification is considered; every request re-reads the authoritative row from
    `users` via a connection with no analytics privileges at all.
 2. **Row-level security** (`db/02_security.sql`): `sales` and `organizations` have RLS
-   policies keyed off session GUCs (`app.current_role`/`app.current_territory`/
-   `app.current_region`) that the backend sets via `SET LOCAL`/`set_config()` at the
-   start of each request's transaction, sourced from the authenticated user's DB row —
-   never from the request body or the LLM's output. `app_exec` carries `BYPASSRLS`.
-3. **Column-level security (WAC)**: `app_director`/`app_ram` are never `GRANT`ed
-   `SELECT` on `sales.wac` — not even implicitly via `SELECT *`, which Postgres rejects
-   with a column-privilege error just like an explicit `SELECT wac` would. Verified
-   directly in `tests/test_db_security.py::test_select_star_denied_because_it_includes_wac`.
-4. **`users` table isolation**: none of `app_exec`/`app_director`/`app_ram` — the roles
-   under which every LLM-generated query executes — are granted anything on `users`.
-   Even a successfully prompt-injected `SELECT * FROM users` fails at the database
-   regardless of role, verified in
+   policies keyed off `session_user` — i.e. *which Postgres login role the connection
+   authenticated as* — joined against a `role_scope` table mapping that role name to a
+   territory or region. The backend picks which of ~22 per-scope login roles to connect
+   as (`app_exec`, `app_director__<region>` ×6, `app_ram__<territory>` ×15) from the
+   authenticated user's DB row, never from the request body or the LLM's output.
+   `app_exec` carries `BYPASSRLS`. **This replaced a session-GUC design after a QA
+   review found it bypassable — see the C1 finding below; this is the current,
+   fixed state.**
+3. **Column-level security (WAC)**: `app_director`/`app_ram` (template roles every
+   per-scope login role inherits from) are never `GRANT`ed `SELECT` on `sales.wac` —
+   not even implicitly via `SELECT *`, which Postgres rejects with a column-privilege
+   error just like an explicit `SELECT wac` would. Verified directly in
+   `tests/test_db_security.py::test_select_star_denied_because_it_includes_wac`.
+4. **`users` table isolation**: none of `app_exec`/`app_director__*`/`app_ram__*` — the
+   roles under which every LLM-generated query executes — are granted anything on
+   `users`. Even a successfully prompt-injected `SELECT * FROM users` fails at the
+   database regardless of role, verified in
    `test_db_security.py::test_users_table_unreachable_by_every_analytics_role`.
-5. **Least privilege by default**: the base login role (`app_login`) is granted the
-   three tier roles `WITH INHERIT FALSE` — a code path that forgets to `SET ROLE`
-   fails closed (no privileges) rather than open.
+5. **Least privilege by default**: `app_login` (the one connection used for the
+   `/login` auth lookup) has no membership in `app_exec`/`app_director`/`app_ram` or any
+   per-scope role at all — not "granted `WITH INHERIT FALSE`" as an earlier revision did,
+   but no grant whatsoever. There is no role it could switch into even if a code path
+   tried; a bug fails closed by construction, not by a flag that has to be remembered.
 6. **Application-layer SQL validation** (`sql_guard.py`): SELECT/CTE-only, single
    statement, blocklist of DDL/DML/admin keywords, blocked table references
-   (`users`, `pg_catalog`, `information_schema`), a non-exec `wac` check duplicating the
-   DB's own enforcement, and an auto-appended `LIMIT 500` when the model didn't include
-   one.
-7. **Statement timeout**: `SET LOCAL statement_timeout` (default 8s) per scoped
-   transaction, defending against a runaway or accidentally-cartesian generated query.
+   (`users`, `pg_catalog`, `information_schema`), forbidden functions/statements
+   (`set_config`, `current_setting`, `SET`/`RESET`, `pg_sleep`, `dblink`,
+   `lo_import`/`lo_export`), rejection of Unicode-escaped identifiers/strings
+   (`U&"..."`/`U&'...'`, which can spell a banned word past a plain word-list filter), a
+   non-exec `wac` check duplicating the DB's own enforcement, and an auto-appended
+   `LIMIT 500` when the model didn't include one. This is explicitly the *second* line
+   of defense now — see the C1 finding.
+7. **Statement timeout**: `SET LOCAL statement_timeout` (20s) per scoped transaction,
+   defending against a runaway or accidentally-cartesian generated query.
 8. **Revenue → volume substitution**: a lightweight keyword heuristic
    (`_access_note` in `main.py`) detects revenue-flavored questions from non-Exec users
    and asks the answer-generation call to explain the substitution, rather than
@@ -180,6 +191,62 @@ See `tests/test_db_security.py` for the tests that exercise every one of these d
 against the live database (not mocked), and `tests/test_llm_security_and_edge_cases.py`
 for the same guarantees exercised through real chat turns including prompt-injection
 attempts.
+
+### C1 — a real cross-territory data leak, found by an external QA review, now fixed
+
+An external QA review (`QA_REPORT.txt`) found a critical, confirmed data leak: a RAM or
+Director's own generated SQL could read **any other territory or region's data**,
+bypassing row-level security entirely. Worth being direct about rather than glossing
+over, since it's exactly the kind of finding a security-weighted assignment should
+surface.
+
+**What was wrong.** The RLS policies on `sales`/`organizations` were keyed off session
+GUCs — `current_setting('app.current_territory')` etc. — that the backend set via
+`set_config()` at the start of each request's transaction. Those GUCs live in the *same
+session* the LLM-generated SQL then executes in, and `set_config()` is an ordinary
+function, callable from inside a `SELECT`. A RAM's own query could do:
+
+```sql
+SELECT t.n FROM (SELECT set_config('app.current_territory','Texas',true) AS x) c
+CROSS JOIN LATERAL (SELECT count(*) AS n FROM sales WHERE c.x IS NOT NULL) t
+```
+
+and the RLS policy would trust the attacker's value. Confirmed on the full dataset as
+Amy Nguyen (RAM, New York Metro — scoped to 136,921 rows): this payload returned Texas's
+8,736 rows instead of being denied; a second variant that also overwrote
+`app.current_role` to `'director'` returned West region's 39,072 rows; a third looped
+all 15 territories in one query and got every one of them. WAC/pricing stayed protected
+throughout (that's a separate column `GRANT`, not a GUC) — this was specifically a
+territory/region isolation bypass, not a pricing leak.
+
+**The fix, in two layers.** `sql_guard.py` now rejects `set_config`, `current_setting`,
+bare `SET`/`RESET`, `pg_sleep`, `dblink`, `lo_import`/`lo_export` outright, plus
+Unicode-escaped identifiers/strings (`U&"..."`) — a word-list filter is a chasable
+target (you can spell `set_config` past a plain regex by escaping individual
+characters), so that bypass is closed too. But a regex blocklist on LLM-generated text
+was never going to be the *real* fix, so: **`db/02_security.sql` no longer has any
+mutable session state for a query to override.** Scope now comes from *which Postgres
+login role the connection authenticated as* (`session_user`), fixed for the life of the
+connection, decided in Python before any query text exists, and completely unrelated to
+anything the query itself does. Concretely: one login role per territory
+(`app_ram__new_york_metro`, …) and per region (`app_director__northeast`, …), provisioned
+by `db/load_data.py` from the loaded `zip_territory` data, each a member of a `app_ram`/
+`app_director` template role (inheriting the existing wac-excluding column grants) and
+mapped to its scope in a new `role_scope` table that the RLS policies join against. A
+query can still try `SET ROLE app_ram__texas`, but a New York Metro connection is never
+granted membership in any sibling territory's role — only in the shared template — so
+that fails with a permission error regardless of what `sql_guard.py` does or doesn't
+catch. Re-ran all three confirmed bypass payloads directly against the database (not
+through the app, bypassing `sql_guard.py` entirely) after the fix: all three now return
+exactly the caller's own 136,921 rows. See `tests/test_db_security.py`'s `test_c1_*`
+tests for the automated version of this, and `tests/test_sql_guard.py`'s `test_c1_*`
+tests for the application-layer block.
+
+**Why both layers, if the DB-level fix alone closes it.** Defense in depth: the
+application-layer guard rejects these payloads *before* they reach the database at all
+(cheaper, and produces a friendly chat message instead of a raw permission error), and
+it's a backstop against any future regression in the RLS design — the DB fix is the
+actual guarantee, the guard is insurance.
 
 ## AWS services used
 

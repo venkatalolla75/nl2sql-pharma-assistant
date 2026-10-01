@@ -36,11 +36,12 @@ POSTGRES_DB=${db_name}
 POSTGRES_USER=${rds_username}
 POSTGRES_PASSWORD=${rds_password}
 APP_DB_PASSWORD=${app_db_password}
+SCOPE_ROLE_PASSWORD=${scope_role_password}
 DEMO_USER_PASSWORD=${demo_user_password}
 SESSION_SECRET=${session_secret}
 AWS_REGION=${aws_region}
 BEDROCK_MODEL_ID=${bedrock_model_id}
-STATEMENT_TIMEOUT_MS=8000
+STATEMENT_TIMEOUT_MS=20000
 ENVEOF
 chmod 600 /opt/app/.env
 

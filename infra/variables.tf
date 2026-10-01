@@ -71,7 +71,7 @@ variable "budget_monthly_limit_usd" {
 
 variable "budget_alert_email" {
   type    = string
-  default = "chopradeepanshu@gmail.com"
+  default = "venkatalolla75@gmail.com"
 }
 
 variable "repo_url" {

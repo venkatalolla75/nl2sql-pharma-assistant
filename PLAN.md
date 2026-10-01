@@ -72,9 +72,9 @@ explicit that no period/emphasis wording changes the no-wac rule. Re-verified 3/
 isolation and the full 134/134 suite clean afterward.
 
 Also fixed in passing (user asked to confirm it): `infra/variables.tf`'s
-`budget_alert_email` default was `chopradeepanshu@gmail.com` (wrong since this variable
-was first introduced — no `tfvars` override exists, so this default is what actually
-applies to the live AWS Budget alert). Corrected to `venkatalolla75@gmail.com`.
+`budget_alert_email` default was wrong (an old personal address) since this variable was
+first introduced — no `tfvars` override exists, so this default is what actually applies
+to the live AWS Budget alert. Corrected to `venkatalolla75@gmail.com`.
 
 ## Live deploy log (git history rewritten to Venkata, redeploy, found+fixed a real
 ## deploy-breaking bug, verified against the live site)

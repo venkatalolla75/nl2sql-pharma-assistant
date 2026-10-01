@@ -15,6 +15,7 @@ from app import bedrock
 from app.auth import authenticate, get_user_by_id
 from app.db import scoped_cursor
 from app.periods import period_note as _period_note
+from app.scope_guard import find_out_of_scope_mention
 from app.sql_guard import (
     SqlValidationError,
     ensure_default_period,
@@ -157,6 +158,23 @@ def chat(body: ChatRequest, request: Request):
         raise HTTPException(status_code=400, detail="Empty message")
 
     history = _conversations.setdefault(user["user_id"], [])
+
+    # H1 (QA report): a named territory/region outside the user's scope would otherwise
+    # reach the DB, come back empty (RLS correctly denies it), and the answer step would
+    # fabricate a business-sounding explanation for the empty result instead of saying
+    # access was denied. Catch it on the question text first — before spending an LLM
+    # call or a query on something that will always return nothing.
+    out_of_scope_message = find_out_of_scope_mention(
+        question, user["role"], user["territory_name"], user["region_name"]
+    )
+    if out_of_scope_message is not None:
+        history.append({"role": "user", "content": question})
+        history.append({"role": "assistant", "content": "NO_QUERY: out of scope"})
+        del history[: max(0, len(history) - 2 * MAX_HISTORY_TURNS)]
+        return {
+            "answer": out_of_scope_message, "sql": None,
+            "columns": [], "rows": [], "row_count": 0,
+        }
 
     try:
         raw_sql = bedrock.generate_sql(

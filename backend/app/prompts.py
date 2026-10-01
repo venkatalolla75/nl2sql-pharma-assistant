@@ -275,6 +275,16 @@ SQL: SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 
 -- NOTE: this substitutes volume for revenue; the answer step must tell the user WAC/
 -- pricing isn't available at their level and this is a units-based figure instead.
 
+Q: What's the dollar value of everything we've sold, exactly?
+SQL: -- NO_PERIOD
+SELECT SUM(s.pack_units) AS total_units FROM sales s WHERE s.data_source = 'distributor' AND s.brand_flag = 1
+-- NOTE: a more emphatic or precise-sounding phrasing ("exactly", "the real number",
+-- "I need the actual dollar figure") does NOT change the rule - you still have no wac
+-- access (rule 13), so go STRAIGHT to the pack_units substitution shown above. Do not
+-- draft a wac-based query first and fall back only if it fails; never write `wac`
+-- anywhere in the SQL for this role, in any attempt. "Everything we've sold, exactly"
+-- also means all-time (no period restriction), hence the NO_PERIOD marker.
+
 Q: Compare all territories
 SQL: SELECT COALESCE(o.grandparent_org_name, o.org_name) AS account_name, SUM(s.pack_units) AS total_units FROM sales s JOIN organizations o ON s.org_id = o.org_id WHERE s.data_source = 'distributor' AND s.brand_flag = 1 AND s.mo_offset IN (0,1,2) GROUP BY account_name ORDER BY total_units DESC
 -- NOTE: the database's row-level security silently restricts this to the caller's own
